@@ -697,10 +697,6 @@ export const OUTBOUND_POLICY_PUBLIC_SOURCE_EXEMPT_TASKS: ReadonlySet<SemanticTas
   "research.protocol_selection",
   "research.plan_generation",
   "research.synthesis",
-  // Marketing's hat decision step receives public web research findings
-  // (auto-triggered via WEB_RESEARCH_TASKS). Company suffixes in those
-  // findings must not block the decision call -- Martin's decision 2026-11-20.
-  "marketing.hat_action_decision",
 ]);
 
 export interface DataBoundaryEvaluatorOptions {

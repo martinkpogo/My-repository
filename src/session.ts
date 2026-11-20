@@ -50,6 +50,8 @@ import {
   handleGoogleAccountSelection,
   handleGoogleFolderSelection,
   handleGoogleActionApproval,
+  sendGoogleFolderPicker,
+  type GoogleFolderPickerInput,
 } from "./googleOAuth";
 import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeEntityTokenRef, safeMatterTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen, closeHandoffOnResult } from "./handoffLifecycle";
@@ -64,7 +66,7 @@ import {
   recordApprovalRequestDelivery,
   resultReviewCallbackData,
 } from "./resultReview";
-import type { InlineButton } from "./telegram";
+import type { HatMessageTarget, InlineButton } from "./telegram";
 import { runWithAdoptedOwnership } from "./handoffOwnership";
 import { ensureMatterIdentity, isTerminalWorkStage, syncMatterContinuationPointer } from "./matterContinuation";
 import { findUnitManifest, findCallbackPrefixOwner } from "./units/registry";
@@ -79,6 +81,7 @@ const RESULT_ACCEPTED_ON_OUTPUT_APPROVAL_MESSAGE =
 
 /** The storage flag that arms the Checker's advisory assessment for alarm(). */
 const PENDING_ADVISORY_ASSESSMENT_KEY = "pendingAdvisoryAssessment";
+const PENDING_GOOGLE_FOLDER_PICKER_KEY = "pendingGoogleFolderPicker";
 /** A paused research job this Work resumes on its alarm (option B). */
 const PENDING_RESEARCH_KEY = "pendingResearch";
 /** The last completed research job, for the Continue / Deep research buttons. */
@@ -354,6 +357,9 @@ export class WorkSession extends DurableObject<Env> {
     await this.runPendingAdvisoryAssessment();
     // A research job paused because providers were busy (option B). Never throws.
     await this.runPendingResearch();
+    // A deferred Google Drive folder picker, resumed from stashed input.
+    // Never throws and never blocks other alarm tasks.
+    await this.runPendingGoogleFolderPicker();
   }
 
   /**
@@ -555,6 +561,38 @@ export class WorkSession extends DurableObject<Env> {
   }
 
   /**
+   * Resumes a deferred Google Drive folder picker that was stashed by
+   * handleGoogleAccountSelection when background deps were supplied. The
+   * picker input was persisted under PENDING_GOOGLE_FOLDER_PICKER_KEY and the
+   * alarm armed at the same time; this handler reads it back, deletes it so a
+   * re-fired alarm can never run the same picker twice, and invokes the
+   * existing sendGoogleFolderPicker implementation in its own request with its
+   * own subrequest allowance.
+   *
+   * Never throws: a missing or corrupt pending input is a silent no-op, and a
+   * Drive/Telegram failure reports to Martin without blocking the alarm.
+   */
+  private async runPendingGoogleFolderPicker(): Promise<void> {
+    try {
+      const input = await this.ctx.storage.get<GoogleFolderPickerInput>(PENDING_GOOGLE_FOLDER_PICKER_KEY);
+      if (!input) return;
+      // Delete before sending so a duplicate or re-fired alarm cannot execute
+      // the same picker twice.
+      await this.ctx.storage.delete(PENDING_GOOGLE_FOLDER_PICKER_KEY);
+      const target: HatMessageTarget = {
+        chatId: input.chatId,
+        threadId: input.threadId,
+        hat: input.hat,
+        workId: input.workId,
+      };
+      await sendGoogleFolderPicker(this.env, target, input.workId, input);
+    } catch (err) {
+      const state = await this.getState().catch(() => undefined);
+      console.error(`WorkSession: deferred Google folder picker failed for work ${state?.workId ?? "(unknown)"}`, err);
+    }
+  }
+
+  /**
    * Every scheduled pickup runs through runWithAdoptedOwnership first: the
    * Handoff's own destination facts (To Unit / To Hat) become this Work's
    * recorded Unit/Hat/Action before its handler runs, so the receiving Unit
@@ -748,7 +786,13 @@ export class WorkSession extends DurableObject<Env> {
         // callbacks remain hardcoded: they authorize cross-system OAuth
         // flows and belong to no Unit's business decisions.
         case "googleaccount":
-          return handleGoogleAccountSelection(this.env, state, value);
+          return handleGoogleAccountSelection(this.env, state, value, {
+            stashPickerInput: (input) => this.ctx.storage.put(PENDING_GOOGLE_FOLDER_PICKER_KEY, input),
+            armAlarm: async (ms) => {
+              const existing = await this.ctx.storage.getAlarm();
+              if (existing === null || existing > ms) await this.ctx.storage.setAlarm(ms);
+            },
+          })
         case "googlefolder":
           return handleGoogleFolderSelection(this.env, state, value);
         case "googleaction":

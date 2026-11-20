@@ -27,6 +27,7 @@ import {
   PendingGoogleAction,
   persistGoogleTokens,
   proposeGoogleDocCreation,
+  sendGoogleFolderPicker,
   handleGoogleActionApproval,
   type GoogleFolderPickerInput,
   registerWatchedGoogleDoc,
@@ -38,6 +39,7 @@ import {
 } from "./googleOAuth";
 import { buildProposalDocLayout } from "./proposalRedline";
 import type { WorkState } from "./types";
+import { kvGet } from "./kvStore";
 
 function createMockKv() {
   const store = new Map<string, { value: string; expirationTtl?: number }>();
@@ -446,6 +448,280 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("folder_list callback advances to next page with account and content retained", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-pagination-1";
+  const allFolders = Array.from({ length: 25 }, (_, i) => ({
+    id: `folder-${i}`,
+    name: `Folder ${i}`,
+  }));
+
+  let driveCalls = 0;
+  let pagesSent: any[] = [];
+  let pageButtons: any[] = [];
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.includes("googleapis.com/drive/v3/files")) {
+      driveCalls++;
+      const urlObj = new URL(urlStr);
+      const pageSize = parseInt(urlObj.searchParams.get("pageSize") ?? "100", 10);
+      const pageToken = urlObj.searchParams.get("pageToken");
+      const start = pageToken ? parseInt(pageToken, 10) : 0;
+      const page = allFolders.slice(start, start + pageSize);
+      return new Response(
+        JSON.stringify({
+          files: page,
+          nextPageToken: start + pageSize < allFolders.length ? String(start + pageSize) : undefined,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      pagesSent.push(body.text || "");
+      pageButtons.push(body.reply_markup?.inline_keyboard || []);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    threadId: 777,
+    hat: "Marketing Strategist",
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-account-1", refresh_token: "refresh-account-1", expires_in: 3600 },
+    "user@enig.com",
+  );
+
+  try {
+    // Page 1: sendGoogleFolderPicker fetches all folders, stages folder_list, renders page 1
+    const input: any = {
+      workId,
+      chatId: 12345,
+      threadId: 777,
+      hat: "Marketing Strategist",
+      accountIdentifier: "user@enig.com",
+      title: "Proposal Folder",
+      content: "Content here",
+      rows: undefined,
+      docType: "doc",
+      smoke: false,
+    };
+    await sendGoogleFolderPicker(fakeEnv, { chatId: 12345, threadId: 777, hat: "Marketing Strategist", workId }, workId, input);
+
+    assert.strictEqual(driveCalls, 1, "Drive API called once to fetch all folders");
+    assert.strictEqual(pagesSent.length, 1, "one picker page sent");
+    assert.ok(pageButtons[0].some((row: any) => row.some((b: any) => b.text === "📂 More folders")), "page 1 has 'More folders' button");
+
+    // Extract the folder_list opaque id from the "More folders" button
+    const moreButton = pageButtons[0].find((row: any) => row.some((b: any) => b.text === "📂 More folders"))![0];
+    const folderListCallback = moreButton.callback_data;
+    const [, , opaqueListId] = folderListCallback.split(":");
+
+    // Verify the folder_list option exists with correct properties (peek, don't consume)
+    const listOptionRaw = await kvGet(fakeEnv, `google_option:${workId}:${opaqueListId}`);
+    const listOption = listOptionRaw ? JSON.parse(listOptionRaw) : null;
+    assert.ok(listOption, "folder_list option exists");
+    assert.strictEqual(listOption.kind, "folder_list");
+    assert.strictEqual(listOption.pageIndex, 1, "staged for page 2");
+    assert.strictEqual(listOption.accountIdentifier, "user@enig.com");
+    assert.strictEqual(listOption.title, "Proposal Folder");
+    assert.strictEqual(listOption.content, "Content here");
+
+    // Page 2: handleGoogleFolderSelection with the folder_list option (consumes it)
+    const state2: WorkState = { ...state };
+    let page2Text = "";
+    let page2Buttons: any[] = [];
+  globalThis.fetch = (async (url: string, _init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(String(_init?.body));
+      page2Text = body.text || "";
+      page2Buttons = body.reply_markup?.inline_keyboard || [];
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    await handleGoogleFolderSelection(fakeEnv, state2, opaqueListId);
+
+    assert.ok(page2Buttons.some((row) => row.some((b: any) => b.text === "📁 Folder 18")), "page 2 shows folders 18-4 (alphabetical sort)");
+    assert.ok(page2Buttons.some((row) => row.some((b: any) => b.text === "📂 More folders")), "page 2 has 'More folders' button");
+
+    // Page 3: extract and peek at the next folder_list (don't consume yet)
+    const moreButton2 = page2Buttons.find((row: any) => row.some((b: any) => b.text === "📂 More folders"))![0];
+    const folderListCallback2 = moreButton2.callback_data;
+    const [, , opaqueListId2] = folderListCallback2.split(":");
+    const listOption2Raw = await kvGet(fakeEnv, `google_option:${workId}:${opaqueListId2}`);
+    const listOption2 = listOption2Raw ? JSON.parse(listOption2Raw) : null;
+    assert.ok(listOption2, "page 2 folder_list option exists");
+    assert.strictEqual(listOption2.pageIndex, 2, "staged for page 3");
+
+    // Page 3: final page (folders 20-24), no "More folders" button
+    let page3Text = "";
+    let page3Buttons: any[] = [];
+    globalThis.fetch = (async (url: string, _init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(String(_init?.body));
+        page3Text = body.text || "";
+        page3Buttons = body.reply_markup?.inline_keyboard || [];
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    const state3: WorkState = { ...state };
+    await handleGoogleFolderSelection(fakeEnv, state3, opaqueListId2);
+
+    assert.ok(page3Buttons.some((row) => row.some((b: any) => b.text === "📁 Folder 5")), "page 3 shows folders 5-9 (final page)");
+    assert.ok(!page3Buttons.some((row) => row.some((b: any) => b.text === "📂 More folders")), "final page has no 'More folders' button");
+
+    // Account and content retained across pages
+    assert.strictEqual(page2Text.includes("user@enig.com"), true, "account retained on page 2");
+    assert.strictEqual(page3Text.includes("Proposal Folder"), true, "title retained on page 3");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("repeated folder_list callback cannot execute the same page turn twice", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-stale-pagination";
+  const allFolders = Array.from({ length: 15 }, (_, i) => ({ id: `folder-${i}`, name: `Folder ${i}` }));
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-account-1", refresh_token: "refresh-account-1", expires_in: 3600 },
+    "user@enig.com",
+  );
+
+  let pagesSent = 0;
+  let pickerButtons: any[] = [];
+  globalThis.fetch = (async (url: string, _init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.includes("googleapis.com/drive/v3/files")) {
+      return new Response(JSON.stringify({ files: allFolders, nextPageToken: undefined }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      pagesSent++;
+      const body = JSON.parse(String(_init?.body));
+      pickerButtons = body.reply_markup?.inline_keyboard || [];
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  const input: any = {
+    workId,
+    chatId: 12345,
+    threadId: 777,
+    hat: "Marketing Strategist",
+    accountIdentifier: "user@enig.com",
+    title: "Proposal Folder",
+    content: "Content here",
+    rows: undefined,
+    docType: "doc",
+    smoke: false,
+  };
+  await sendGoogleFolderPicker(fakeEnv, { chatId: 12345, threadId: 777, hat: "Marketing Strategist", workId }, workId, input);
+
+  // Extract folder_list opaque id from "More folders" button
+  const moreButton = pickerButtons.find((row: any) => row.some((b: any) => b.text === "📂 More folders"))![0];
+  const opaqueListId = moreButton.callback_data.split(":")[2];
+
+  // First consumption succeeds
+  const first = await consumeOpaqueOption(fakeEnv, workId, opaqueListId);
+  assert.ok(first, "first consumption succeeds");
+
+  // Second consumption fails - single-use protection
+  const second = await consumeOpaqueOption(fakeEnv, workId, opaqueListId);
+  assert.strictEqual(second, null, "repeated folder_list callback returns null");
+
+  // handleGoogleFolderSelection with consumed option: no picker sent, state unchanged
+  let page4Text = "";
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      page4Text = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  const state4: WorkState = { workId, chatId: 12345, threadId: 777, hat: "Marketing Strategist", stage: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const resultState = await handleGoogleFolderSelection(fakeEnv, state4, opaqueListId);
+  assert.strictEqual(resultState, state4, "state unchanged after consumed callback");
+  assert.ok(page4Text.includes("invalid or expired"), "repeated callback refused with invalid or expired");
+  assert.strictEqual(pagesSent, 1, "no additional picker page sent");
+
+  globalThis.fetch = originalFetch;
+});
+
+test("Drive API pagination across multiple pages retrieves all folders", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const allFolders = Array.from({ length: 250 }, (_, i) => ({ id: `folder-${i}`, name: `Folder ${i}` }));
+  let driveCalls = 0;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-account-1", refresh_token: "refresh-account-1", expires_in: 3600 },
+    "user@enig.com",
+  );
+
+  globalThis.fetch = (async (url: string, _init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.includes("googleapis.com/drive/v3/files")) {
+      driveCalls++;
+      const pageSize = 100;
+      const start = (driveCalls - 1) * pageSize;
+      const page = allFolders.slice(start, start + pageSize);
+      return new Response(
+        JSON.stringify({
+          files: page,
+          nextPageToken: start + pageSize < allFolders.length ? `token-${driveCalls}` : undefined,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  const input: any = {
+    workId: "work-multipage",
+    chatId: 12345,
+    threadId: 777,
+    hat: "Marketing Strategist",
+    accountIdentifier: "user@enig.com",
+    title: "Proposal Folder",
+    content: "Content here",
+    rows: undefined,
+    docType: "doc",
+    smoke: false,
+  };
+  await sendGoogleFolderPicker(fakeEnv, { chatId: 12345, threadId: 777, hat: "Marketing Strategist", workId: "work-multipage" }, "work-multipage", input);
+
+  assert.strictEqual(driveCalls, 3, "Drive API called 3 times for 250 folders across 3 pages");
+
+  globalThis.fetch = originalFetch;
 });
 
 test("proposeGoogleDocCreation and handleGoogleActionApproval enforce state-bound parameter immutability", async () => {
