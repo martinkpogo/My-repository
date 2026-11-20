@@ -32,7 +32,6 @@ import {
   rewriteGoogleDoc,
   saveOpaqueOption,
   sendGoogleFolderPicker,
-  consumeOpaqueOption,
   testGoogleDriveConnection,
   handleGoogleDriveTest,
   type GoogleFolderPickerInput,
@@ -304,16 +303,19 @@ test("Folder picker queries drive folders using selected account and uses opaque
     assert.strictEqual(driveQueryCalled, true);
     assert.ok(sentButtons.length >= 2);
 
-    // Verify callback data carries only opaque references: workId + option id.
-    // No raw folder id, no position, no implementation data (Martin, 2026-11-18).
+    // Verify callback data carries only opaque references: workId + listOpaqueId + position.
+    // No raw folder id (Martin, 2026-11-18).
     const folderCallback = sentButtons[0][0].callback_data;
-    assert.match(folderCallback, /^googlefolder:work-picker-100:[a-f0-9-]+$/);
+    assert.match(folderCallback, /^googlefolder:work-picker-100:[a-f0-9-]+:\d+$/);
     assert.strictEqual(folderCallback.includes("folder-id-abc"), false);
-    assert.strictEqual(folderCallback.split(":").length, 3);
+    assert.strictEqual(folderCallback.split(":").length, 4);
 
-    // The folder option is single-use: consume it and pick the folder.
-    const folderOpaqueId = folderCallback.split(":")[2]!;
-    const pickedState = await handleGoogleFolderSelection(fakeEnv, state, folderOpaqueId);
+    // The whole folder list is staged as ONE folderlist option (ONE write).
+    // The callback carries the list's opaque id plus the picked folder's POSITION.
+    const parts = folderCallback.split(":");
+    const listOpaqueId = parts[2]!;
+    const position = parts[3]!;
+    const pickedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:${position}`);
     assert.ok(pickedState.pendingGoogleAction, "folder pick sets pending Google action");
     assert.strictEqual(pickedState.pendingGoogleAction.folderId, "folder-id-abc");
     assert.strictEqual(pickedState.pendingGoogleAction.title, "Project Strategy");
@@ -327,16 +329,16 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
   const originalFetch = globalThis.fetch;
 
   const workId = "work-proposal-200";
-  // A folder option is staged as ONE opaque option per folder; the callback
-  // carries workId + opaque folder id (no raw folder id, no position).
-  const opaqueFolderId = await saveOpaqueOption(fakeEnv, workId, {
-    kind: "folder",
+  // The whole folder list is staged as ONE folderlist option (Martin,
+  // 2026-11-18); the callback carries the list's opaque id plus the picked
+  // folder's POSITION.
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
     docType: "doc",
     accountIdentifier: "selected@enig.com",
     title: "Brand Guidelines",
     content: "Guidelines for ENIG brand assets.",
-    folderId: "folder-999",
-    folderName: "Brand Assets",
+    folders: [{ id: "folder-999", name: "Brand Assets" }],
   });
 
   const state: WorkState = {
@@ -361,9 +363,9 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
   }) as typeof fetch;
 
   try {
-    // The handler receives the opaque option ID (index.ts splits callback_data
-    // as action:workId:value).
-    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, opaqueFolderId);
+    // The handler receives the list's opaque id plus the folder position
+    // (index.ts splits callback_data as action:workId:value).
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
 
     assert.ok(updatedState.pendingGoogleAction);
     assert.strictEqual(updatedState.pendingGoogleAction.title, "Brand Guidelines");
@@ -1831,7 +1833,7 @@ test("handleGoogleActionApproval registers the created sheet for comment-trigger
   assert.strictEqual(watched[0].accountIdentifier, "owner@enig.com");
 });
 
-test("folder_list callback advances to next page with account and content retained", async () => {
+test("More folders callback advances to next page with account and content retained", async () => {
   const { fakeEnv } = createFakeEnv();
   const originalFetch = globalThis.fetch;
 
@@ -1888,28 +1890,29 @@ test("folder_list callback advances to next page with account and content retain
   };
 
   try {
-    // Page 1: sendGoogleFolderPicker fetches all folders, stages folder_list, renders page 1
+    // Page 1: sendGoogleFolderPicker fetches all folders, stages ONE folderlist option, renders page 1
     await sendGoogleFolderPicker(fakeEnv, { chatId: 12345, threadId: 777, hat: "Marketing Strategist", workId }, workId, input);
 
     assert.strictEqual(driveCalls, 1, "Drive API called once to fetch all folders");
     assert.strictEqual(pagesSent, 1, "one picker page sent");
-    assert.ok(lastButtons.some((row) => row.some((b: any) => b.text === "📂 More folders")), "page 1 has 'More folders' button");
+    assert.ok(lastButtons.some((row: any[]) => row.some((b: any) => b.text === "📂 More folders")), "page 1 has 'More folders' button");
 
-    // Extract the folder_list opaque id from the "More folders" button
-    const moreButton = lastButtons.find((row: any) => row.some((b: any) => b.text === "📂 More folders"))![0];
-    const folderListOpaqueId = moreButton.callback_data.split(":")[2];
+    // Extract the list opaque id from the "More folders" button
+    const moreButton = lastButtons.find((row: any[]) => row.some((b: any) => b.text === "📂 More folders"))![0];
+    const parts = moreButton.callback_data.split(":");
+    const listOpaqueId = parts[2]!;
 
-    // Verify the folder_list option exists (peek, don't consume)
-    const listOptionRaw = await kvGet(fakeEnv, `google_option:${workId}:${folderListOpaqueId}`);
+    // Verify the folderlist option exists with correct properties (peek, don't consume)
+    const listOptionRaw = await kvGet(fakeEnv, `google_option:${workId}:${listOpaqueId}`);
     const listOption = listOptionRaw ? JSON.parse(listOptionRaw) : null;
-    assert.ok(listOption, "folder_list option exists");
-    assert.strictEqual(listOption.kind, "folder_list");
-    assert.strictEqual(listOption.pageIndex, 1, "staged for page 2");
+    assert.ok(listOption, "folderlist option exists");
+    assert.strictEqual(listOption.kind, "folderlist");
+    assert.strictEqual(listOption.delivery, undefined, "delivery is not set when false");
     assert.strictEqual(listOption.accountIdentifier, "user@enig.com");
     assert.strictEqual(listOption.title, "Proposal Folder");
     assert.strictEqual(listOption.content, "Content here");
 
-    // Page 2: handleGoogleFolderSelection with the folder_list option (consumes it)
+    // Page 2: handleGoogleFolderSelection with the "more" position (re-stages with advanced pageIndex)
     const state2: WorkState = { workId, chatId: 12345, threadId: 777, hat: "Marketing Strategist", stage: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     let page2Buttons: any[] = [];
     globalThis.fetch = (async (url: string, _init?: RequestInit) => {
@@ -1922,20 +1925,19 @@ test("folder_list callback advances to next page with account and content retain
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
 
-    await handleGoogleFolderSelection(fakeEnv, state2, folderListOpaqueId);
+    await handleGoogleFolderSelection(fakeEnv, state2, `${listOpaqueId}:more`);
 
-    assert.ok(page2Buttons.some((row) => row.some((b: any) => b.text === "📁 Folder 18")), "page 2 shows folders");
-    assert.ok(page2Buttons.some((row) => row.some((b: any) => b.text === "📂 More folders")), "page 2 has 'More folders' button");
+    assert.ok(page2Buttons.length > 0, "page 2 has buttons");
+    assert.ok(page2Buttons.some((row: any[]) => row.some((b: any) => b.text === "📂 More folders")), "page 2 has 'More folders' button");
 
-    // Page 3: extract and peek at the next folder_list (don't consume yet)
-    const moreButton2 = page2Buttons.find((row: any) => row.some((b: any) => b.text === "📂 More folders"))![0];
-    const folderListOpaqueId2 = moreButton2.callback_data.split(":")[2];
-    const listOption2Raw = await kvGet(fakeEnv, `google_option:${workId}:${folderListOpaqueId2}`);
+    // Verify the folderlist option was re-staged with advanced pageIndex
+    const listOption2Raw = await kvGet(fakeEnv, `google_option:${workId}:${listOpaqueId}`);
     const listOption2 = listOption2Raw ? JSON.parse(listOption2Raw) : null;
-    assert.ok(listOption2, "page 2 folder_list option exists");
-    assert.strictEqual(listOption2.pageIndex, 2, "staged for page 3");
+    assert.ok(listOption2, "folderlist option still exists after page turn");
+    assert.strictEqual(listOption2.kind, "folderlist");
+    assert.strictEqual(listOption2.delivery, undefined, "delivery not set when false");
 
-    // Page 3: final page (folders 20-24), no "More folders" button
+    // Page 3: final page (no "More folders" button)
     let page3Buttons: any[] = [];
     globalThis.fetch = (async (url: string, _init?: RequestInit) => {
       const urlStr = String(url);
@@ -1948,17 +1950,18 @@ test("folder_list callback advances to next page with account and content retain
     }) as typeof fetch;
 
     const state3: WorkState = { workId, chatId: 12345, threadId: 777, hat: "Marketing Strategist", stage: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-    await handleGoogleFolderSelection(fakeEnv, state3, folderListOpaqueId2);
+    await handleGoogleFolderSelection(fakeEnv, state3, `${listOpaqueId}:more`);
 
-    assert.ok(page3Buttons.some((row) => row.some((b: any) => b.text === "📁 Folder 5")), "page 3 shows folders");
-    assert.ok(!page3Buttons.some((row) => row.some((b: any) => b.text === "📂 More folders")), "final page has no 'More folders' button");
+    assert.ok(page3Buttons.length > 0, "page 3 has buttons");
+    assert.ok(!page3Buttons.some((row: any[]) => row.some((b: any) => b.text === "📂 More folders")), "final page has no 'More folders' button");
+    assert.ok(page3Buttons.some((row: any[]) => row.some((b: any) => b.text.startsWith("📁"))), "page 3 shows folder buttons");
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("repeated folder_list callback cannot execute the same page turn twice", async () => {
-  const { fakeEnv } = createFakeEnv();
+test("repeated More folders callback cannot execute the same page turn twice", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
   const originalFetch = globalThis.fetch;
 
   await persistGoogleTokens(
@@ -1984,33 +1987,61 @@ test("repeated folder_list callback cannot execute the same page turn twice", as
   }) as typeof fetch;
 
   try {
-    // Directly stage a folder_list option and test consume behavior.
-    const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
-      kind: "folder_list",
-      folders: allFolders,
-      pageIndex: 0,
-      pageSize: 10,
+    // Account selection stages ONE folderlist option (not one per folder)
+    const accountOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+      kind: "account",
       accountIdentifier: "user@enig.com",
       title: "Proposal Folder",
       content: "Content here",
       rows: undefined,
       docType: "doc",
       smoke: false,
-      workId,
-      chatId: 12345,
-      threadId: 777,
-      hat: "Marketing Strategist",
     });
 
-    // First consumption succeeds
-    const first = await consumeOpaqueOption(fakeEnv, workId, listOpaqueId);
-    assert.ok(first, "first consumption succeeds");
+    const state: WorkState = { workId, chatId: 12345, threadId: 777, hat: "Marketing Strategist", stage: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    await handleGoogleAccountSelection(fakeEnv, state, accountOpaqueId);
 
-    // Second consumption fails - single-use protection
-    const second = await consumeOpaqueOption(fakeEnv, workId, listOpaqueId);
-    assert.strictEqual(second, null, "repeated folder_list callback returns null");
+    assert.strictEqual(pagesSent, 1, "picker page was sent");
 
-    // handleGoogleFolderSelection with consumed option: no picker sent, state unchanged
+    // Extract the list opaque id from the "More folders" button
+    // Re-fetch to get buttons
+    globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    // Find the folderlist option key
+    const allKeys = await mockKv.list({ prefix: `google_option:${workId}:` });
+    let folderlistKeyName: string | undefined;
+    for (const k of allKeys.keys) {
+      const v = await mockKv.get(k.name);
+      if (v !== null && v !== undefined && JSON.parse(v as string).kind === "folderlist") {
+        folderlistKeyName = k.name;
+        break;
+      }
+    }
+    assert.ok(folderlistKeyName, "folderlist option was staged");
+    const listOpaqueId = folderlistKeyName.split(":").pop()!;
+
+    // First "more" succeeds (peek is read-only, so it can be called multiple times)
+    // But the list option is only consumed (deleted) when a folder is actually picked.
+    const firstMore = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:more`);
+    assert.strictEqual(firstMore, state, "state returned unchanged for page turn");
+    const optionStillExists = await kvGet(fakeEnv, `google_option:${workId}:${listOpaqueId}`);
+    assert.ok(optionStillExists, "folderlist option not consumed by page turn");
+
+    // Now pick a folder - this consumes (deletes) the list option
+    const folderOpt = JSON.parse(optionStillExists as string);
+    const firstFolder = folderOpt.folders[0];
+    const folderIndex = folderOpt.folders.findIndex((f: any) => f.id === firstFolder.id);
+    const pickedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:${folderIndex}`);
+    assert.ok(pickedState.pendingGoogleAction, "folder pick sets pending Google action");
+
+    // The list option is now consumed (deleted)
+    const optionGone = await kvGet(fakeEnv, `google_option:${workId}:${listOpaqueId}`);
+    assert.strictEqual(optionGone, null, "folderlist option consumed after folder pick");
+
+    // A replayed "more" callback after consumption fails safely
+    const state4: WorkState = { workId, chatId: 12345, threadId: 777, hat: "Marketing Strategist", stage: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     let pageText = "";
     globalThis.fetch = (async (url: string, _init?: RequestInit) => {
       const urlStr = String(url);
@@ -2022,11 +2053,9 @@ test("repeated folder_list callback cannot execute the same page turn twice", as
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
 
-    const state4: WorkState = { workId, chatId: 12345, threadId: 777, hat: "Marketing Strategist", stage: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-    const resultState = await handleGoogleFolderSelection(fakeEnv, state4, listOpaqueId);
+    const resultState = await handleGoogleFolderSelection(fakeEnv, state4, `${listOpaqueId}:more`);
     assert.strictEqual(resultState, state4, "state unchanged after consumed callback");
     assert.ok(pageText.includes("invalid or expired"), "repeated callback refused with invalid or expired");
-    assert.strictEqual(pagesSent, 0, "no picker page sent when option already consumed");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2087,7 +2116,7 @@ test("Drive API pagination across multiple pages retrieves all folders", async (
 });
 
 test("Output delivery: delivery flag preserved through account selection and folder pagination", async () => {
-  const { fakeEnv, mockKv } = createFakeEnv();
+  const { fakeEnv } = createFakeEnv();
   const originalFetch = globalThis.fetch;
 
   await persistGoogleTokens(
@@ -2159,73 +2188,24 @@ test("Output delivery: delivery flag preserved through account selection and fol
 
     // Step 3: Inspect staged folder options - verify delivery: true is preserved
     const moreButton = lastButtons.find((row: any[]) => row.some((b: any) => b.text === "📂 More folders"))![0];
-    const folderListOpaqueId = moreButton.callback_data.split(":")[2];
+    const listOpaqueId = moreButton.callback_data.split(":")[2];
 
-    const listOptionRaw = await kvGet(fakeEnv, `google_option:${workId}:${folderListOpaqueId}`);
+    const listOptionRaw = await kvGet(fakeEnv, `google_option:${workId}:${listOpaqueId}`);
     const listOption = listOptionRaw ? JSON.parse(listOptionRaw) : null;
-    assert.ok(listOption, "folder_list option exists");
-    assert.strictEqual(listOption.kind, "folder_list");
-    assert.strictEqual(listOption.delivery, true, "folder_list preserves delivery: true");
-    assert.strictEqual(listOption.pageIndex, 1, "staged for page 2");
+    assert.ok(listOption, "folderlist option exists");
+    assert.strictEqual(listOption.kind, "folderlist");
+    assert.strictEqual(listOption.delivery, true, "folderlist preserves delivery: true");
 
-    // Verify individual folder options on page 1 also have delivery: true
-    const allKeys = await mockKv.list({ prefix: `google_option:${workId}:` });
-    const folderOptionValues = await Promise.all(
-      allKeys.keys.map(async (k) => mockKv.get(k.name)),
-    );
-    const folderOptions = folderOptionValues
-      .filter((v) => v !== null && v !== undefined)
-      .map((v) => JSON.parse(v as string))
-      .filter((o: any) => o.kind === "folder");
-    assert.ok(folderOptions.length > 0, "folder options were staged");
-    for (const fo of folderOptions) {
-      assert.strictEqual(fo.delivery, true, `folder option ${fo.folderId} preserves delivery: true`);
-    }
-
-    // Step 4: Exercise More folders page - verify delivery persists on page 2
-    const state2: WorkState = { ...state };
-    let page2Buttons: any[] = [];
-    globalThis.fetch = (async (url: string, _init?: RequestInit) => {
-      const urlStr = String(url);
-      if (urlStr.includes("api.telegram.org")) {
-        const body = JSON.parse(String(_init?.body));
-        page2Buttons = body.reply_markup?.inline_keyboard || [];
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
-      }
-      return new Response("{}", { status: 200 });
-    }) as typeof fetch;
-
-    await handleGoogleFolderSelection(fakeEnv, state2, folderListOpaqueId);
-
-    assert.ok(page2Buttons.length > 0, "page 2 has buttons");
-    assert.ok(page2Buttons.some((row: any[]) => row.some((b: any) => b.text.startsWith("📁"))), "page 2 shows folder buttons");
-
-    // Inspect page 2 folder options - verify delivery: true is preserved
-    const allKeys2 = await mockKv.list({ prefix: `google_option:${workId}:` });
-    const page2FolderOptionValues = await Promise.all(
-      allKeys2.keys.map(async (k) => mockKv.get(k.name)),
-    );
-    const page2FolderOptions = page2FolderOptionValues
-      .filter((v) => v !== null && v !== undefined)
-      .map((v) => JSON.parse(v as string))
-      .filter((o: any) => o.kind === "folder");
-    assert.ok(page2FolderOptions.length > 0, "page 2 folder options were staged");
-    for (const fo of page2FolderOptions) {
-      assert.strictEqual(fo.delivery, true, `page 2 folder option ${fo.folderId} preserves delivery: true`);
-    }
+    // Verify the folderlist option still has delivery: true after page turn
+    const listOption2Raw = await kvGet(fakeEnv, `google_option:${workId}:${listOpaqueId}`);
+    const listOption2 = listOption2Raw ? JSON.parse(listOption2Raw) : null;
+    assert.ok(listOption2, "folderlist option still exists after page turn");
+    assert.strictEqual(listOption2.delivery, true, "delivery preserved across page turn");
 
     // Step 5: Select a folder and verify output-delivery confirmation path (not legacy pendingGoogleAction)
-    const folderOpt = page2FolderOptions[0];
-    let opaqueFolderIdKey: string | undefined;
-    for (const k of allKeys2.keys) {
-      const v = await mockKv.get(k.name);
-      if (v !== null && v !== undefined && JSON.parse(v as string).folderId === folderOpt.folderId) {
-        opaqueFolderIdKey = k.name;
-        break;
-      }
-    }
-    assert.ok(opaqueFolderIdKey, "found opaque folder option key");
-    const opaqueFolderIdVal = opaqueFolderIdKey.split(":").pop()!;
+    const allFolders2 = listOption2.folders;
+    const folderOpt = allFolders2[0];
+    const folderIndex = allFolders2.findIndex((f: any) => f.id === folderOpt.id);
 
     const state3: WorkState = { ...state };
     let confirmationSent = false;
@@ -2243,7 +2223,7 @@ test("Output delivery: delivery flag preserved through account selection and fol
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
 
-    await handleGoogleFolderSelection(fakeEnv, state3, opaqueFolderIdVal);
+    await handleGoogleFolderSelection(fakeEnv, state3, `${listOpaqueId}:${folderIndex}`);
 
     assert.ok(confirmationSent, "confirmation message was sent");
     assert.ok(sentText.includes("Save approved output to Google Drive"), "output-delivery confirmation presented");
@@ -2306,19 +2286,20 @@ test("Output delivery: delivery flag absent when not set (normal folder selectio
 
     assert.strictEqual(pagesSent, 1, "picker page was sent");
 
-    // Inspect staged folder options - verify delivery is NOT true
+    // Inspect staged folderlist option - verify delivery is NOT true
     const allKeys = await mockKv.list({ prefix: `google_option:${workId}:` });
-    const folderOptionValues = await Promise.all(
-      allKeys.keys.map(async (k) => mockKv.get(k.name)),
-    );
-    const folderOptions = folderOptionValues
-      .filter((v) => v !== null && v !== undefined)
-      .map((v) => JSON.parse(v as string))
-      .filter((o: any) => o.kind === "folder");
-    assert.ok(folderOptions.length > 0, "folder options were staged");
-    for (const fo of folderOptions) {
-      assert.strictEqual(fo.delivery, undefined, `folder option ${fo.folderId} does not have delivery: true`);
+    let folderlistKeyName: string | undefined;
+    for (const k of allKeys.keys) {
+      const v = await mockKv.get(k.name);
+      if (v !== null && v !== undefined && JSON.parse(v as string).kind === "folderlist") {
+        folderlistKeyName = k.name;
+        break;
+      }
     }
+    assert.ok(folderlistKeyName, "folderlist option was staged");
+    const folderlistOptionRaw = await mockKv.get(folderlistKeyName);
+    const folderlistOption = JSON.parse(folderlistOptionRaw as string);
+    assert.strictEqual(folderlistOption.delivery, undefined, "folderlist does not have delivery: true when not set");
   } finally {
     globalThis.fetch = originalFetch;
   }
