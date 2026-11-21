@@ -93,19 +93,18 @@ This section is **Architect guidance**. It tells the Architect how to delegate w
 
 ### Evidence-based agent profiles
 
-The Architect maintains a profile for each agent as practical experience accumulates. Profiles distinguish two kinds of observation:
+The Architect maintains evidence-based knowledge of agent differences as practical experience accumulates. Under this delegation model the Architect retains most planning and coordination responsibility, so profiles focus on what affects how a bounded task is delegated and executed — not on extensive predictions of an agent's ability to independently investigate and implement every kind of large system change.
+
+Profiles distinguish two kinds of observation:
 
 **Agent-level characteristics**
 
-- Execution environment.
-- Repository access and tool capabilities.
-- Repository navigation and code-editing behaviour.
-- Test execution and debugging capabilities.
-- GitHub, issue and PR interaction and reporting behaviour.
-- Agent-specific instruction handling and effective prompt and instruction conventions.
-- How well the agent handles staged work and complex context.
-- Recurring reliability problems and observed failure patterns.
-- Demonstrated strengths and limitations at the agent level.
+- Execution environment and available tools.
+- Repository access and editing behaviour.
+- Reliability when following bounded instructions.
+- Test execution and reporting behaviour.
+- Context and handback limitations.
+- Prompt and instruction conventions that improve execution.
 - Supporting evidence and last-reviewed date.
 
 **Model-level characteristics**
@@ -135,7 +134,7 @@ The Architect adapts the handoff to the actual agent being used. Where appropria
 - Prompt structure and level of instruction detail.
 - Context provided and how it is organized.
 - Task size and decomposition.
-- Whether investigation and implementation should be separate stages.
+- Whether task-local investigation and implementation should be separate stages.
 - How existing implementation and production paths must be traced.
 - Tool-use instructions and expected repository workflow.
 - Failure cases and integration boundaries that require explicit attention.
@@ -144,30 +143,32 @@ The Architect adapts the handoff to the actual agent being used. Where appropria
 
 Do not impose one rigid prompt format or task decomposition method on every agent. For example, Kilo Code may benefit from explicit staged instructions, while another agent may work more effectively from a different instruction structure — such differences are established through observed work, not assumptions.
 
-### Architect-owned impact assessment
+### Architect-owned complete investigation and planning
 
-Operating principle: **the Architect owns the investigation of broader system implications before delegating non-trivial implementation work.**
+Operating principle: **the Architect owns the complete system investigation and planning before implementation begins.**
 
-Before preparing an implementation handoff, the Architect must:
+Before implementation begins, the Architect must understand the complete intended change and is responsible for:
 
-1. Understand the requested change and its intended outcome.
-2. Inspect the existing implementation and trace the relevant production paths.
-3. Identify direct dependencies and indirect downstream effects.
-4. Identify affected components, integrations, workflows and data boundaries.
-5. Identify existing architecture, governance, security and execution contracts that apply.
-6. Determine what must change and what must remain unchanged.
-7. Establish the verification requirements for affected areas.
-8. Record uncertainties and dependencies that could not be verified.
+- Establishing the desired outcome and expected system behaviour.
+- Investigating the existing implementation and the relevant production paths.
+- Identifying all affected components, dependencies, workflows and integrations.
+- Identifying direct and indirect consequences of the change.
+- Determining every implementation modification required for the complete outcome.
+- Identifying implementation dependencies and the correct execution order.
+- Establishing what must remain unchanged, including which existing architecture, governance, security and execution contracts apply.
+- Defining acceptance criteria and verification requirements.
+- Recording uncertainties and dependencies that could not be verified.
+- Producing a complete, internally maintained implementation roadmap.
 
-The Architect converts these findings into an **Architect Impact Assessment** included in the implementation handoff.
+The Architect must do this investigation **before issuing implementation tasks**. Its purpose is to prevent implementation agents from having to independently discover and coordinate the entire system change when the Architect has already done that work.
 
-The assessment should contain:
+These findings are recorded as the **Architect Impact Assessment**, which should contain:
 
 - Requested change and intended outcome.
 - Investigation performed and relevant existing implementation.
 - Identified affected components and dependencies.
 - Direct and indirect consequences.
-- Required implementation changes.
+- Required implementation changes and their execution order.
 - Explicit no-change boundaries.
 - Existing contracts and constraints.
 - Required integration and regression checks.
@@ -175,23 +176,113 @@ The assessment should contain:
 
 The assessment must be proportional to the risk and complexity of the change. Do not require exhaustive system-wide investigations for trivial changes.
 
+#### The roadmap stays with the Architect
+
+The complete impact assessment and implementation roadmap remain under **Architect control**. Do not make it a mandatory requirement to pass the entire impact assessment, all future implementation stages or the complete system investigation to an alternative implementation agent.
+
+This is deliberate context management. The Architect must retain enough knowledge of the complete change to coordinate all stages and understand how each task contributes to the intended final outcome.
+
+**The agent receives the context necessary for its current assignment, not the entire investigation by default.**
+
+### Incremental implementation — default for alternative agents
+
+For implementation agents other than Claude Code, the default approach is Architect-directed incremental execution:
+
+1. Architect completes the investigation and implementation plan.
+2. Architect divides the work into ordered, manageable implementation tasks.
+3. Architect issues only the first task to the selected agent.
+4. The agent implements that task within its stated boundaries.
+5. Architect independently examines the actual changes and verifies the task's acceptance criteria.
+6. If accepted, Architect issues the next task using the verified repository state.
+7. This continues until every planned implementation task is complete.
+8. Architect performs final integration and regression verification against the original intended outcome.
+
+Each task instruction must contain:
+
+- The specific objective.
+- The relevant implementation context needed for this task.
+- Exact scope and affected areas, where established.
+- Required behaviour and constraints.
+- Explicit no-change boundaries.
+- Acceptance criteria.
+- Relevant verification requirements.
+- Expected reporting and handback.
+
+Do not expose future implementation tasks unnecessarily. The agent must not independently proceed to later stages, expand the scope or implement additional changes simply because it can anticipate what comes next.
+
 #### Implementation agent responsibilities
 
-The implementation agent receives the Architect's assessment as part of its assignment. It must:
+Incremental execution does not eliminate the agent's responsibility to inspect relevant code or exercise engineering judgement. The agent must:
 
-- Understand the supplied impact findings before implementation.
-- Account for identified dependencies and consequences.
+- Inspect the relevant existing implementation before editing.
+- Validate the supplied task against the actual code.
+- Follow existing contracts and established implementation patterns.
+- Account for the identified dependencies and consequences in its assignment.
 - Address the specified implementation and verification requirements.
 - Avoid changing explicitly protected areas.
-- Report when an assessment finding is inconsistent with the actual code.
+- Report contradictions, missing dependencies, unexpected consequences, uncertainty, or a supplied finding that is inconsistent with the actual code.
 - Identify additional dependencies or consequences discovered during implementation.
-- Stop and seek Architect direction when discoveries require changes to approved architecture, governance, security, authority or scope.
+- Stop and seek Architect direction when a discovery requires changing approved scope, architecture, governance, security or authority.
+- Report exactly what changed and what verification was actually performed.
 
-The agent must not silently discard or independently redefine the Architect's findings. The Architect remains responsible for reviewing whether the assessment was adequately addressed.
+The agent must not silently discard or independently redefine the Architect's findings. The Architect must reassess such discoveries and decide whether the implementation roadmap needs updating before issuing further work, and remains responsible for reviewing whether the assessment was adequately addressed.
+
+### Do not create unnecessary stages
+
+Incremental execution is a control mechanism, not a requirement to split every change into many tiny tasks. The Architect determines task boundaries based on:
+
+- Dependency order.
+- Implementation complexity.
+- Risk.
+- Context requirements.
+- Independent verifiability.
+- Whether combining tasks would make failures harder to isolate.
+
+A small, isolated change may be one task. A broad, interconnected change should be divided into ordered stages. The objective is controlled progress without unnecessary delegation overhead.
+
+### Claude Code — selective use of a shared resource
+
+Claude Code is accessed through a work account shared with other users. Its five-hour and weekly usage limits are therefore a **constrained shared resource**. Do not assume unlimited or routine access to Claude Code.
+
+Martin may use whichever alternative agent is available to carry out the incremental implementation process. Claude Code should be conserved for occasions where its demonstrated ability to handle broader repository investigation, reasoning and coordinated implementation provides meaningful additional value.
+
+Its preferred role in this operating model is **selective, independent review of accumulated implementation work** at meaningful milestones, or when the Architect identifies a problem requiring deeper investigation. Examples:
+
+- Reviewing the complete implementation after several related stages.
+- Examining a high-risk architectural change.
+- Investigating a difficult unresolved technical issue.
+- Reviewing interactions between components that have been implemented incrementally.
+- Identifying gaps that may have escaped the staged verification process.
+
+Do not automatically send every small implementation task or correction to Claude Code. Do not require Claude Code to review every stage.
+
+When it is used for independent review, provide the original objective, approved constraints and relevant implementation evidence. Do not ask it merely to approve another agent's completion report.
+
+Claude Code may still be used directly by Martin for broader assignments when he chooses and its availability and shared usage budget justify doing so. The Architect must not make its participation mandatory.
+
+### Two delegation approaches
+
+The guide distinguishes two operating approaches. These are operational adaptations, not agent rankings or permanent capability classifications, and **Martin remains the authority on which agent is available and which approach is used**.
+
+**Approach A — Architect-directed incremental execution** (default when using alternative implementation agents):
+
+- Architect investigates and plans the complete change.
+- Architect controls the implementation sequence.
+- Agent receives one bounded task at a time.
+- Architect verifies before advancing.
+- Architect owns final integration verification.
+
+**Approach B — broader direct implementation** (available when Martin chooses to work directly with Claude Code):
+
+- Martin establishes the intended outcome and makes the necessary decisions.
+- Claude Code may undertake broader investigation, planning and implementation.
+- Architect involvement is not a mandatory intermediary.
+- Existing ENIG approval, scope, security, governance and verification requirements still apply.
+- Claude Code's completion claims must still be independently checked.
 
 ### Consistent ENIG standards
 
-Adaptation changes how work is delegated, not what ENIG requires. Every agent remains bound by:
+Adaptation changes how work is delegated, not what ENIG requires. **Both operating approaches** preserve the same standards, and every agent remains bound by:
 
 - The same approved architecture and governance.
 - The same security and identity boundaries.
@@ -213,6 +304,20 @@ Do not turn every isolated mistake into a permanent profile characteristic.
 ### Independent verification
 
 An agent's completion report is not proof. The Architect independently verifies the actual implementation, scope, existing patterns, failure handling, tests and claimed results. Verification depth accounts for task risk and the selected agent's demonstrated reliability.
+
+### Final system verification
+
+After all incremental tasks are complete, the Architect must verify the complete change against the original intended outcome and the internally maintained implementation roadmap, confirming that:
+
+- All planned changes were implemented.
+- All affected components and integrations were adapted.
+- New and existing workflows behave correctly.
+- Dependencies and contracts remain consistent.
+- Regression checks cover relevant existing behaviour.
+- No unintended scope expansion occurred.
+- Outstanding uncertainties are identified rather than assumed resolved.
+
+Passing individual task checks does not automatically prove that the complete system change works.
 
 ### Profile maintenance
 
@@ -256,6 +361,8 @@ These observations describe demonstrated ENIG work, not universal characteristic
 ### Governing principle for delegation
 
 The ENIG Architect adapts delegation to the agent Martin has chosen. The agent does not determine ENIG's engineering standards, architecture, authority or governance. Different agents may receive different instructions for the same underlying task; the required outcome and governing constraints remain identical.
+
+Under the default approach the Architect retains complete planning and coordination responsibility — investigating the full change, maintaining the roadmap, issuing bounded tasks incrementally and verifying each before advancing — while Claude Code is conserved as a shared resource for selective independent review or broader direct work when Martin chooses it. These are operational adaptations only: they do not rank agents, assign permanent task categories, or change any agent's authority.
 
 ## ENIG Runtime Architecture — mandatory reading
 
