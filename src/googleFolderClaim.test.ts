@@ -6,6 +6,7 @@ import {
   resolveFolderClaimOnStorage,
   getFolderClaimStatusOnStorage,
   type FolderClaimRecord,
+  type FolderClaimStatus,
 } from "./googleFolderClaim";
 
 /**
@@ -292,6 +293,169 @@ test("googleFolderClaim: claim record shape is correct", async () => {
     assert.strictEqual(raw.status, "claimed");
     assert.strictEqual(raw.createdAt, 1_700_000_000_000);
     assert.strictEqual(raw.resolvedAt, undefined);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("googleFolderClaim: expired terminal markers are removed correctly", async () => {
+  const storage = createMockDurableObjectStorage();
+  const originalNow = Date.now;
+  try {
+    Date.now = () => 0 as unknown as number;
+
+    await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-remove-exp");
+    await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-remove-exp", "completed");
+
+    Date.now = () => (24 * 60 * 60 * 1000 + 1) as unknown as number;
+
+    // Status read should delete the expired marker and return undefined
+    const status = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-remove-exp");
+    assert.strictEqual(status, undefined, "expired terminal marker should be removed");
+
+    // Key should actually be deleted from storage
+    const raw = await storage.get<FolderClaimRecord>("googleFolderClaim:opaque-remove-exp");
+    assert.strictEqual(raw, undefined, "expired marker key should be deleted from storage");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("googleFolderClaim: unexpired terminal markers are retained", async () => {
+  const storage = createMockDurableObjectStorage();
+  const originalNow = Date.now;
+  try {
+    Date.now = () => 0 as unknown as number;
+
+    await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-keep-unexp");
+    await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-keep-unexp", "completed");
+
+    // Still at T=0, well within retention
+    const status = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-keep-unexp");
+    assert.strictEqual(status, "completed", "unexpired terminal marker should be retained");
+
+    // Key should still exist
+    const raw = await storage.get<FolderClaimRecord>("googleFolderClaim:opaque-keep-unexp");
+    assert.ok(raw, "unexpired marker key should still exist");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("googleFolderClaim: claimed markers are never removed regardless of age", async () => {
+  const storage = createMockDurableObjectStorage();
+  const originalNow = Date.now;
+  try {
+    Date.now = () => 0 as unknown as number;
+
+    await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-claimed-never-remove");
+
+    // Advance clock well past retention
+    Date.now = () => (24 * 60 * 60 * 1000 * 365) as unknown as number;
+
+    const status = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-claimed-never-remove");
+    assert.strictEqual(status, "claimed", "claimed marker should not be removed regardless of age");
+
+    // Key should still exist
+    const raw = await storage.get<FolderClaimRecord>("googleFolderClaim:opaque-claimed-never-remove");
+    assert.ok(raw, "claimed marker key should still exist");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+async function statusCheckAndClaimConcurrently(
+  storage: ReturnType<typeof createMockDurableObjectStorage>,
+  opaqueId: string,
+): Promise<{
+  statusResult: { status: "fulfilled" | "rejected"; value?: FolderClaimStatus | undefined };
+  claimResult: { status: "fulfilled" | "rejected"; value?: boolean };
+}> {
+  const results = await Promise.allSettled([
+    getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, opaqueId),
+    claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, opaqueId),
+  ]);
+  return {
+    statusResult: {
+      status: results[0].status,
+      value: results[0].status === "fulfilled" ? (results[0].value as FolderClaimStatus | undefined) : undefined,
+    },
+    claimResult: {
+      status: results[1].status,
+      value: results[1].status === "fulfilled" ? (results[1].value as boolean) : undefined,
+    },
+  };
+}
+
+test("googleFolderClaim: status check racing with claim replacement cannot delete the replacement claim", async () => {
+  const storage = createMockDurableObjectStorage();
+  const originalNow = Date.now;
+  try {
+    Date.now = () => 0 as unknown as number;
+
+    // Seed an expired completed marker
+    await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-race-delete");
+    await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-race-delete", "completed");
+    Date.now = () => (24 * 60 * 60 * 1000 + 1) as unknown as number;
+
+    const { claimResult } = await statusCheckAndClaimConcurrently(storage, "opaque-race-delete");
+    assert.strictEqual(
+      claimResult.status,
+      "fulfilled",
+      "claim replacement should complete without error",
+    );
+
+    // After both complete, the record must be claimed — the status check
+    // must not have deleted the replacement claim.
+    const finalStatus = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-race-delete");
+    assert.strictEqual(finalStatus, "claimed", "replacement claim must survive concurrent status check");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("googleFolderClaim: status check first, subsequent claim can succeed", async () => {
+  const storage = createMockDurableObjectStorage();
+  const originalNow = Date.now;
+  try {
+    Date.now = () => 0 as unknown as number;
+
+    await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-status-first");
+    await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-status-first", "completed");
+    Date.now = () => (24 * 60 * 60 * 1000 + 1) as unknown as number;
+
+    // Status check runs first: deletes expired marker, returns undefined
+    const statusResult = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-status-first");
+    assert.strictEqual(statusResult, undefined, "status check should return undefined for expired marker");
+
+    // Claim replacement runs after: should succeed (no marker exists)
+    const claimResult = await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-status-first");
+    assert.strictEqual(claimResult, true, "claim should succeed after status check deleted expired marker");
+
+    const finalStatus = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-status-first");
+    assert.strictEqual(finalStatus, "claimed", "record should be claimed after claim replacement");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("googleFolderClaim: claim replacement first, status check preserves new claimed marker", async () => {
+  const storage = createMockDurableObjectStorage();
+  const originalNow = Date.now;
+  try {
+    Date.now = () => 0 as unknown as number;
+
+    await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-claim-first");
+    await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-claim-first", "completed");
+    Date.now = () => (24 * 60 * 60 * 1000 + 1) as unknown as number;
+
+    // Claim replacement runs first: replaces expired marker with claimed
+    const claimResult = await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-claim-first");
+    assert.strictEqual(claimResult, true, "claim replacement should succeed on expired marker");
+
+    // Status check runs after: sees claimed marker, preserves it
+    const statusResult = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-claim-first");
+    assert.strictEqual(statusResult, "claimed", "status check should preserve the new claimed marker");
   } finally {
     Date.now = originalNow;
   }

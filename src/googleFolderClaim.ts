@@ -98,23 +98,34 @@ export async function resolveFolderClaimOnStorage(
  * Reads the claim status for an opaqueId. Completed and failed records older
  * than CLAIM_RETENTION_MS are lazily deleted on access. Claimed records are
  * never auto-released regardless of age.
+ *
+ * The read and any expiry deletion happen inside a single
+ * storage.transaction() so a concurrent claim replacement cannot be deleted
+ * by a stale read: the transaction always operates on the current stored
+ * record.
  */
 export async function getFolderClaimStatusOnStorage(
   storage: DurableObjectStorage,
   opaqueId: string,
 ): Promise<FolderClaimStatus | undefined> {
   const key = `${GOOGLE_FOLDER_CLAIM_KEY_PREFIX}${opaqueId}`;
-  const record = await storage.get<FolderClaimRecord>(key);
-  if (!record) return undefined;
+  return await storage.transaction(async (txn) => {
+    const record = await txn.get<FolderClaimRecord>(key);
+    if (!record) return undefined;
 
-  if (
-    (record.status === "completed" || record.status === "failed") &&
-    record.resolvedAt !== undefined &&
-    Date.now() - record.resolvedAt > CLAIM_RETENTION_MS
-  ) {
-    await storage.delete(key);
+    // A claimed record is never auto-released, regardless of age.
+    if (record.status === "claimed") return "claimed";
+
+    // Completed or failed markers within retention are preserved.
+    if (
+      record.resolvedAt !== undefined &&
+      Date.now() - record.resolvedAt <= CLAIM_RETENTION_MS
+    ) {
+      return record.status;
+    }
+
+    // Expired terminal marker: delete within the same transaction.
+    await txn.delete(key);
     return undefined;
-  }
-
-  return record.status;
+  });
 }
