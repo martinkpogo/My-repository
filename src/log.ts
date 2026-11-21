@@ -24,7 +24,15 @@ export interface LogEntryInput {
   workId?: string;
 }
 
-export async function logActivity(env: Env, input: LogEntryInput): Promise<void> {
+export interface LogActivityOptions {
+  throwOnError?: boolean;
+}
+
+export async function logActivity(
+  env: Env,
+  input: LogEntryInput,
+  options?: LogActivityOptions,
+): Promise<void> {
   try {
     await createPage(
       env,
@@ -43,8 +51,6 @@ export async function logActivity(env: Env, input: LogEntryInput): Promise<void>
     );
   } catch (err) {
     console.error("Activity & Decision Log write failed", err, input);
-    if (process.env.ENIG_LOG_ACTIVITY_THROW === "true") {
-      throw err;
-    }
+    if (options?.throwOnError) throw err;
   }
 }

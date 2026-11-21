@@ -1937,7 +1937,7 @@ async function renderFolderList(
       activity: `Registry smoke Drive folder picker presented for account '${option.accountIdentifier}' (${totalFolders} folders)`,
       outcome: "Active",
       workId: state.workId,
-    });
+    }, { throwOnError: true });
   } else {
     await logActivity(env, {
       entry: "Google Drive folders presented",
@@ -2218,7 +2218,7 @@ export async function handleGoogleFolderSelection(
         activity: `Registry smoke target selected for account '${accountIdentifier}' in folder '${folderName}' (${folderId}) -- awaiting explicit confirmation`,
         outcome: "Active",
         workId: state.workId,
-      });
+      }, { throwOnError: true });
     } catch (err) {
       // Telegram was delivered successfully; activity logging failed.
       // Preserve pending state so the delivered confirmation button remains usable.
@@ -2297,7 +2297,7 @@ export async function handleGoogleFolderSelection(
         activity: `Output delivery target selected for account '${accountIdentifier}' in folder '${folderName}' (${folderId}) -- awaiting explicit confirmation`,
         outcome: "Active",
         workId: state.workId,
-      });
+      }, { throwOnError: true });
     } catch (err) {
       // Telegram was delivered successfully; activity logging failed.
       // Preserve pending state so the delivered confirmation button remains usable.
@@ -2360,7 +2360,7 @@ export async function handleGoogleFolderSelection(
         type: "Activity",
         activity: `Google Sheet creation proposed for '${title}' in folder '${folderName}' (${folderId}) for account '${accountIdentifier}'`,
         outcome: "Active",
-      });
+      }, { throwOnError: true });
     } catch (err) {
       // Telegram was delivered successfully; activity logging failed.
       // Preserve pending state so the delivered proposal button remains usable.
@@ -2413,7 +2413,7 @@ export async function handleGoogleFolderSelection(
       type: "Activity",
       activity: `Google Doc creation proposed for '${title}' in folder '${folderName}' (${folderId}) for account '${accountIdentifier}'`,
       outcome: "Active",
-    });
+    }, { throwOnError: true });
   } catch (err) {
     // Telegram was delivered successfully; activity logging failed.
     // Preserve pending state so the delivered proposal button remains usable.
