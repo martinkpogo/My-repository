@@ -2220,10 +2220,11 @@ export async function handleGoogleFolderSelection(
         workId: state.workId,
       });
     } catch (err) {
-      // Telegram was delivered but activity logging failed. State may not be
-      // persisted. Resolve as failed so the claim is not stranded.
-      clearPendingState();
-      await resolveClaimFailed("⚠️ Smoke confirmation was delivered but processing was interrupted. Your selection was recorded — try again or start a fresh /googledocssmoke flow.");
+      // Telegram was delivered successfully; activity logging failed.
+      // Preserve pending state so the delivered confirmation button remains usable.
+      // Do not resolve the claim as failed or completed merely because logging failed.
+      console.error(`Folder selection: smoke confirmation activity logging failed for work ${state.workId}`, err);
+      await notifyWorkspaceTaskError("⚠️ Your smoke confirmation was delivered but activity logging failed. No document has been created. Please check whether the confirmation message arrived before retrying.");
       return state;
     }
 
@@ -2298,7 +2299,11 @@ export async function handleGoogleFolderSelection(
         workId: state.workId,
       });
     } catch (err) {
-      await resolveClaimFailed("⚠️ Output-delivery confirmation was delivered but processing was interrupted. Your selection was recorded — try again or start a fresh selection.");
+      // Telegram was delivered successfully; activity logging failed.
+      // Preserve pending state so the delivered confirmation button remains usable.
+      // Do not resolve the claim as failed or completed merely because logging failed.
+      console.error(`Folder selection: output-delivery confirmation activity logging failed for work ${state.workId}`, err);
+      await notifyWorkspaceTaskError("⚠️ Your output-delivery confirmation was delivered but activity logging failed. No document has been created. Please check whether the confirmation message arrived before retrying.");
       return state;
     }
 
@@ -2357,8 +2362,11 @@ export async function handleGoogleFolderSelection(
         outcome: "Active",
       });
     } catch (err) {
-      clearPendingState();
-      await resolveClaimFailed("⚠️ Google Sheet proposal was delivered but processing was interrupted. Your selection was recorded — try again or start a fresh selection.");
+      // Telegram was delivered successfully; activity logging failed.
+      // Preserve pending state so the delivered proposal button remains usable.
+      // Do not resolve the claim as failed or completed merely because logging failed.
+      console.error(`Folder selection: Google Sheet proposal activity logging failed for work ${state.workId}`, err);
+      await notifyWorkspaceTaskError("⚠️ Your Google Sheet proposal was delivered but activity logging failed. No sheet has been created. Please check whether the proposal message arrived before retrying.");
       return state;
     }
 
@@ -2407,8 +2415,11 @@ export async function handleGoogleFolderSelection(
       outcome: "Active",
     });
   } catch (err) {
-    clearPendingState();
-    await resolveClaimFailed("⚠️ Google Doc proposal was delivered but processing was interrupted. Your selection was recorded — try again or start a fresh selection.");
+    // Telegram was delivered successfully; activity logging failed.
+    // Preserve pending state so the delivered proposal button remains usable.
+    // Do not resolve the claim as failed or completed merely because logging failed.
+    console.error(`Folder selection: Google Doc proposal activity logging failed for work ${state.workId}`, err);
+    await notifyWorkspaceTaskError("⚠️ Your Google Doc proposal was delivered but activity logging failed. No document has been created. Please check whether the proposal message arrived before retrying.");
     return state;
   }
 

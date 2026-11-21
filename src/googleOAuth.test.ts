@@ -4145,3 +4145,319 @@ test("Stage 4B: out-of-bounds folder position — Workspace notification transpo
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Stage 4C: smoke path — logActivity success after Telegram delivered, state preserved", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-smoke-logactivity";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    smoke: true,
+    docType: "doc",
+    accountIdentifier: "smoke-logactivity@enig.com",
+    title: "Smoke LogActivity Test",
+    content: "Testing logActivity path on smoke",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    pendingSmokeSelection: {
+      accountIdentifier: "smoke-logactivity@enig.com",
+      folderId: "folder-1",
+      folderName: "Folder One",
+      createdAt: new Date().toISOString(),
+    },
+  };
+
+  const telegramTexts: string[] = [];
+  let fetchCallCount = 0;
+
+  // All API calls succeed (Telegram delivers confirmation, Notion accepts activity log)
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      fetchCallCount++;
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      telegramTexts.push(body.text || "");
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let resolveFailedCalled = false;
+    let resolveCompletedCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => true,
+      resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+        if (status === "failed") resolveFailedCalled = true;
+        if (status === "completed") resolveCompletedCalled = true;
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    // Pending smoke selection preserved
+    assert.strictEqual(updatedState.pendingSmokeSelection?.folderId, "folder-1", "pendingSmokeSelection preserved");
+    assert.strictEqual(updatedState.pendingSmokeSelection?.accountIdentifier, "smoke-logactivity@enig.com", "pendingSmokeSelection.accountIdentifier preserved");
+
+    // Claim completed after successful logActivity
+    assert.strictEqual(resolveFailedCalled, false, "claim NOT resolved as failed when logActivity succeeds");
+    assert.strictEqual(resolveCompletedCalled, true, "claim resolved as completed when logActivity succeeds (smoke)");
+
+    // Confirmation message sent exactly once
+    assert.strictEqual(fetchCallCount, 1, "smoke confirmation sent exactly once (no retry)");
+    assert.match(telegramTexts[0], /GOVERNED TOOL REGISTRY SMOKE/, "smoke confirmation message sent");
+
+    // No Workspace notification attempted (no error occurred)
+    assert.strictEqual(fetchCallCount, 1, "no Workspace notification attempted when logActivity succeeds");
+
+    // No document-creation action triggered before user confirms
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "no pendingGoogleAction on smoke path");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: output delivery path — logActivity success after Telegram delivered, state preserved", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-delivery-logactivity";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    delivery: true,
+    docType: "doc",
+    accountIdentifier: "delivery-logactivity@enig.com",
+    title: "Delivery LogActivity Test",
+    content: "Testing logActivity path on delivery",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const telegramTexts: string[] = [];
+  let fetchCallCount = 0;
+
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      fetchCallCount++;
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      telegramTexts.push(body.text || "");
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let resolveFailedCalled = false;
+    let resolveCompletedCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => true,
+      resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+        if (status === "failed") resolveFailedCalled = true;
+        if (status === "completed") resolveCompletedCalled = true;
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    // Claim completed after successful logActivity
+    assert.strictEqual(resolveFailedCalled, false, "claim NOT resolved as failed when logActivity succeeds (delivery)");
+    assert.strictEqual(resolveCompletedCalled, true, "claim resolved as completed when logActivity succeeds (delivery)");
+
+    // Confirmation message sent exactly once
+    assert.strictEqual(fetchCallCount, 1, "delivery confirmation sent exactly once (no retry)");
+    assert.match(telegramTexts[0], /Save approved output to Google Drive/, "delivery confirmation message sent");
+
+    // No Workspace notification attempted (no error occurred)
+    assert.strictEqual(fetchCallCount, 1, "no Workspace notification attempted when logActivity succeeds");
+
+    // No pending action set (delivery path doesn't set pendingGoogleAction)
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "no pendingGoogleAction on delivery path");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: sheet proposal path — logActivity success after Telegram delivered, state preserved", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-sheet-logactivity";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "sheet",
+    accountIdentifier: "sheet-logactivity@enig.com",
+    title: "Sheet LogActivity Test",
+    content: "Testing logActivity path on sheet",
+    rows: [["A1", "B1"], ["A2", "B2"]],
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    pendingGoogleAction: {
+      type: "create_sheet",
+      title: "Sheet LogActivity Test",
+      rows: [["A1", "B1"], ["A2", "B2"]],
+      folderId: "folder-1",
+      accountIdentifier: "sheet-logactivity@enig.com",
+    },
+    pendingActionSummary: {
+      label: "Create Google Sheet: Sheet LogActivity Test",
+      message: "Proposal message",
+      buttons: [],
+      createdAt: new Date().toISOString(),
+    },
+  };
+
+  const telegramTexts: string[] = [];
+  let fetchCallCount = 0;
+
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      fetchCallCount++;
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      telegramTexts.push(body.text || "");
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let resolveFailedCalled = false;
+    let resolveCompletedCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => true,
+      resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+        if (status === "failed") resolveFailedCalled = true;
+        if (status === "completed") resolveCompletedCalled = true;
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    // Pending sheet state preserved
+    assert.strictEqual(updatedState.pendingGoogleAction?.type, "create_sheet", "pendingGoogleAction preserved");
+    assert.strictEqual(updatedState.pendingGoogleAction?.title, "Sheet LogActivity Test", "pendingGoogleAction.title preserved");
+    assert.strictEqual(updatedState.pendingActionSummary?.label, "Create Google Sheet: Sheet LogActivity Test", "pendingActionSummary preserved");
+
+    // Claim completed after successful logActivity
+    assert.strictEqual(resolveFailedCalled, false, "claim NOT resolved as failed when logActivity succeeds (sheet)");
+    assert.strictEqual(resolveCompletedCalled, true, "claim resolved as completed when logActivity succeeds (sheet)");
+
+    // Confirmation message sent exactly once
+    assert.strictEqual(fetchCallCount, 1, "sheet proposal sent exactly once (no retry)");
+    assert.match(telegramTexts[0], /Proposed Action.*Create Google Sheet/, "sheet proposal message sent");
+
+    // No Workspace notification attempted (no error occurred)
+    assert.strictEqual(fetchCallCount, 1, "no Workspace notification attempted when logActivity succeeds");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: doc proposal path — logActivity success after Telegram delivered, state preserved", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-doc-logactivity";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "doc-logactivity@enig.com",
+    title: "Doc LogActivity Test",
+    content: "Testing logActivity path on doc",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    pendingGoogleAction: {
+      type: "create_doc",
+      title: "Doc LogActivity Test",
+      content: "Testing logActivity path on doc",
+      folderId: "folder-1",
+      accountIdentifier: "doc-logactivity@enig.com",
+    },
+    pendingActionSummary: {
+      label: "Create Google Doc: Doc LogActivity Test",
+      message: "Proposal message",
+      buttons: [],
+      createdAt: new Date().toISOString(),
+    },
+  };
+
+  const telegramTexts: string[] = [];
+  let fetchCallCount = 0;
+
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      fetchCallCount++;
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      telegramTexts.push(body.text || "");
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let resolveFailedCalled = false;
+    let resolveCompletedCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => true,
+      resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+        if (status === "failed") resolveFailedCalled = true;
+        if (status === "completed") resolveCompletedCalled = true;
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    // Pending doc state preserved
+    assert.strictEqual(updatedState.pendingGoogleAction?.type, "create_doc", "pendingGoogleAction preserved");
+    assert.strictEqual(updatedState.pendingGoogleAction?.title, "Doc LogActivity Test", "pendingGoogleAction.title preserved");
+    assert.strictEqual(updatedState.pendingActionSummary?.label, "Create Google Doc: Doc LogActivity Test", "pendingActionSummary preserved");
+
+    // Claim completed after successful logActivity
+    assert.strictEqual(resolveFailedCalled, false, "claim NOT resolved as failed when logActivity succeeds (doc)");
+    assert.strictEqual(resolveCompletedCalled, true, "claim resolved as completed when logActivity succeeds (doc)");
+
+    // Confirmation message sent exactly once
+    assert.strictEqual(fetchCallCount, 1, "doc proposal sent exactly once (no retry)");
+    assert.match(telegramTexts[0], /Proposed Action.*Create Google Doc/, "doc proposal message sent");
+
+    // No Workspace notification attempted (no error occurred)
+    assert.strictEqual(fetchCallCount, 1, "no Workspace notification attempted when logActivity succeeds");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
