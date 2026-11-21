@@ -1944,6 +1944,7 @@ async function renderFolderList(
       type: "Activity",
       activity: `Drive folder picker presented for account '${option.accountIdentifier}' (${totalFolders} folders)`,
       outcome: "Active",
+      workId: state.workId,
     });
   }
   return state;
