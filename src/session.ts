@@ -824,7 +824,7 @@ export class WorkSession extends DurableObject<Env> {
         case "googleaccount":
           return handleGoogleAccountSelection(this.env, state, value);
         case "googlefolder":
-          return handleGoogleFolderSelection(this.env, state, value);
+          return handleGoogleFolderSelection(this.env, state, value, this);
         case "googleaction":
           return handleGoogleActionApproval(this.env, state, value === "approve");
         case RESEARCH_WORK_CALLBACK:

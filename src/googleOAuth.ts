@@ -1,4 +1,5 @@
 import type { Env, WorkState } from "./types";
+import type { FolderClaimStatus } from "./googleFolderClaim";
 import { buildDocStyleRequests, observedStylingMatches, type GoogleDocLayout, type ObservedDocParagraph, type ObservedDocStyling, type ObservedDocTextStyle } from "./googleDocSpec";
 // The observed read-back shapes are declared by the neutral specification
 // module (the one vocabulary for a document's declared and actual styling);
@@ -1948,10 +1949,23 @@ async function renderFolderList(
   return state;
 }
 
+/**
+ * Minimal interface for the Stage 4A WorkSession claim methods, exposed to
+ * `handleGoogleFolderSelection` so the callback can coordinate on the
+ * Durable Object transaction-backed claim primitive without importing the
+ * full WorkSession class.
+ */
+interface FolderClaimMethods {
+  claimFolderOption(opaqueId: string): Promise<boolean>;
+  resolveFolderClaim(opaqueId: string, status: "completed" | "failed"): Promise<void>;
+  getFolderClaimStatus(opaqueId: string): Promise<FolderClaimStatus | undefined>;
+}
+
 export async function handleGoogleFolderSelection(
   env: Env,
   state: WorkState,
   opaqueOptionId: string,
+  claims: FolderClaimMethods,
 ): Promise<WorkState> {
   const target: HatMessageTarget = {
     chatId: state.chatId,
@@ -1968,9 +1982,17 @@ export async function handleGoogleFolderSelection(
   const opaqueId = colon === -1 ? opaqueOptionId : opaqueOptionId.slice(0, colon);
   const position = colon === -1 ? undefined : opaqueOptionId.slice(colon + 1);
 
-  // First, peek to validate the pick without consuming.
-  // The WorkSession Durable Object serializes callback execution for the same
-  // workId, so no other request can consume the option between peek and consume.
+  // STEP 1: Check the claim status FIRST, before reading the folder-list
+  // option. A duplicate callback arriving after the winner has consumed the
+  // option must be silently ignored, not misclassified as expired/invalid.
+  const claimStatus = await claims.getFolderClaimStatus(opaqueId);
+  if (claimStatus === "claimed" || claimStatus === "completed" || claimStatus === "failed") {
+    // Duplicate callback: silently ignore. No Telegram message, no peek,
+    // no consumption, no continuation.
+    return state;
+  }
+
+  // STEP 2: Peek the existing folder-list option (no claim yet).
   const option = await peekOpaqueOption(env, state.workId, opaqueId);
   if (!option || option.kind !== "folderlist" || !Array.isArray(option.folders)) {
     await sendWorkspaceHatMessage(
@@ -1981,6 +2003,7 @@ export async function handleGoogleFolderSelection(
     return state;
   }
 
+  // STEP 3: Validate the selected folder position against the peeked option.
   const index = position === undefined ? NaN : Number(position);
   const picked = Number.isInteger(index) && index >= 0 && index < option.folders.length ? option.folders[index] : undefined;
   if (!picked) {
@@ -1992,14 +2015,20 @@ export async function handleGoogleFolderSelection(
     return state;
   }
 
-  // Pick is valid: now atomically consume the option (read + delete).
-  // Under Durable Object serialization, this is race-free.
-  // We MUST use the consumed option for the actual pick to ensure
-  // single-use semantics even if another request consumed between peek and consume.
+  // STEP 4: Attempt the atomic claim. The Stage 4A DO transaction-backed
+  // primitive decides the winner. If we lose, return silently.
+  const claimed = await claims.claimFolderOption(opaqueId);
+  if (!claimed) {
+    // Lost the claim race: another callback already won. Silent ignore.
+    return state;
+  }
+
+  // STEP 5: Only the winner consumes the option.
   const consumed = await consumeOpaqueOption(env, state.workId, opaqueId);
   if (!consumed) {
-    // Another request already consumed it (should not happen under DO serialization,
-    // but handled defensively).
+    // Defensive: option already consumed by another path despite our claim.
+    // Resolve as failed and notify.
+    await claims.resolveFolderClaim(opaqueId, "failed").catch(() => {});
     await sendWorkspaceHatMessage(
       env,
       target,
@@ -2010,6 +2039,7 @@ export async function handleGoogleFolderSelection(
   // Re-validate the pick against the consumed option (authoritative source).
   const revalidated = Number.isInteger(index) && index >= 0 && index < consumed.folders.length ? consumed.folders[index] : undefined;
   if (!revalidated) {
+    await claims.resolveFolderClaim(opaqueId, "failed").catch(() => {});
     await sendWorkspaceHatMessage(
       env,
       target,
@@ -2017,6 +2047,7 @@ export async function handleGoogleFolderSelection(
     );
     return state;
   }
+
   const { accountIdentifier, title, content, rows } = consumed;
   const folderId = revalidated.id;
   const folderName = revalidated.name;
@@ -2045,6 +2076,7 @@ export async function handleGoogleFolderSelection(
       });
     } catch (err) {
       console.error(`Google Docs smoke confirmation staging failed for work ${state.workId} -- nothing was staged`, err);
+      await claims.resolveFolderClaim(opaqueId, "failed").catch(() => {});
       await sendWorkspaceHatMessage(
         env,
         target,
@@ -2087,6 +2119,9 @@ export async function handleGoogleFolderSelection(
       workId: state.workId,
     });
 
+    // STEP 6: Mark the claim completed after successful handoff to the smoke confirmation stage.
+    await claims.resolveFolderClaim(opaqueId, "completed").catch(() => {});
+
     return state;
   }
 
@@ -2107,6 +2142,7 @@ export async function handleGoogleFolderSelection(
       });
     } catch (err) {
       console.error(`Output delivery: confirmation staging failed for work ${state.workId} -- nothing was staged`, err);
+      await claims.resolveFolderClaim(opaqueId, "failed").catch(() => {});
       await sendWorkspaceHatMessage(
         env,
         target,
@@ -2139,6 +2175,10 @@ export async function handleGoogleFolderSelection(
       outcome: "Active",
       workId: state.workId,
     });
+
+    // STEP 6: Mark the claim completed after successful handoff to the delivery confirmation stage.
+    await claims.resolveFolderClaim(opaqueId, "completed").catch(() => {});
+
     return state;
   }
 
@@ -2174,6 +2214,9 @@ export async function handleGoogleFolderSelection(
       outcome: "Active",
     });
 
+    // STEP 6: Mark the claim completed after successful handoff to the sheet proposal stage.
+    await claims.resolveFolderClaim(opaqueId, "completed").catch(() => {});
+
     return state;
   }
 
@@ -2198,6 +2241,9 @@ export async function handleGoogleFolderSelection(
     activity: `Google Doc creation proposed for '${title}' in folder '${folderName}' (${folderId}) for account '${accountIdentifier}'`,
     outcome: "Active",
   });
+
+  // STEP 6: Mark the claim completed after successful handoff to the doc proposal stage.
+  await claims.resolveFolderClaim(opaqueId, "completed").catch(() => {});
 
   return state;
 }

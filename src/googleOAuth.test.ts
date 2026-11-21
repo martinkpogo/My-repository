@@ -37,6 +37,7 @@ import {
 } from "./googleOAuth";
 import { buildProposalDocLayout } from "./proposalRedline";
 import type { WorkState } from "./types";
+import type { FolderClaimStatus } from "./googleFolderClaim";
 
 function createMockKv() {
   const store = new Map<string, { value: string; expirationTtl?: number }>();
@@ -94,6 +95,27 @@ function createFakeEnv() {
     WORKSPACE_TOPIC_ID: "1",
   } as Env;
   return { fakeEnv, mockKv };
+}
+
+/**
+ * Mock Stage 4A claim methods for tests. Defaults: no existing claim (status
+ * undefined), claim succeeds (returns true), resolve is a no-op. Overrides
+ * let tests simulate existing markers and lost races.
+ */
+function createMockClaims(overrides?: {
+  getFolderClaimStatus?: (opaqueId: string) => Promise<FolderClaimStatus | undefined>;
+  claimFolderOption?: (opaqueId: string) => Promise<boolean>;
+  resolveFolderClaim?: (opaqueId: string, status: "completed" | "failed") => Promise<void>;
+}): {
+  getFolderClaimStatus: (opaqueId: string) => Promise<FolderClaimStatus | undefined>;
+  claimFolderOption: (opaqueId: string) => Promise<boolean>;
+  resolveFolderClaim: (opaqueId: string, status: "completed" | "failed") => Promise<void>;
+} {
+  return {
+    getFolderClaimStatus: overrides?.getFolderClaimStatus ?? (async () => undefined),
+    claimFolderOption: overrides?.claimFolderOption ?? (async () => true),
+    resolveFolderClaim: overrides?.resolveFolderClaim ?? (async () => {}),
+  };
 }
 
 // Helper to construct a dummy JWT id_token for account identification testing
@@ -318,7 +340,7 @@ test("Folder picker queries drive folders using selected account and uses opaque
     // Tapping a folder consumes the list: a replayed button cannot re-pick. The
     // handler receives the value segment (index.ts splits callback_data as
     // action:workId:value), i.e. "<listOpaqueId>:<position>".
-    await handleGoogleFolderSelection(fakeEnv, state, folderCallback.split(":").slice(2).join(":"));
+    await handleGoogleFolderSelection(fakeEnv, state, folderCallback.split(":").slice(2).join(":"), createMockClaims());
     const gone = await peekOpaqueOption(fakeEnv, workId, listOpaqueId);
     assert.strictEqual(gone, null, "the list is consumed once a folder is picked");
   } finally {
@@ -457,7 +479,7 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
   try {
     // index.ts splits callback_data as action:workId:value, so the handler
     // receives "<listOpaqueId>:0" -- the list id followed by the position.
-    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, createMockClaims());
 
     assert.ok(updatedState.pendingGoogleAction);
     assert.strictEqual(updatedState.pendingGoogleAction.title, "Brand Guidelines");
@@ -515,9 +537,23 @@ test("Stale and replayed folder selections are rejected -- single-use folder lis
     return new Response("{}", { status: 200 });
   }) as typeof fetch;
 
+  // Stateful mock claims: tracks claim status between calls within this test.
+  let claimStatus: FolderClaimStatus | undefined = undefined;
+  const claims = {
+    getFolderClaimStatus: async (_opaqueId: string) => claimStatus,
+    claimFolderOption: async (_opaqueId: string) => {
+      if (claimStatus) return false;
+      claimStatus = "claimed";
+      return true;
+    },
+    resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+      claimStatus = status;
+    },
+  };
+
   try {
     // First pick: position 0 (Folder One)
-    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
     assert.match(sentTelegramText, /Folder One/);
     assert.match(sentTelegramText, /stale@enig.com/);
 
@@ -532,28 +568,31 @@ test("Stale and replayed folder selections are rejected -- single-use folder lis
     }
     assert.strictEqual(listExists, false, "folder list is consumed after first pick");
 
-    // Replay attempt: same button tapped again
-    // Since the list is gone, consumeOpaqueOption returns null
-    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
-    assert.match(sentTelegramText, /invalid or expired/);
+    // Replay attempt: same button tapped again.
+    // Claim status is now "completed" → silently ignored, no Telegram message.
+    sentTelegramText = "";
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+    assert.strictEqual(sentTelegramText, "", "replay after completed claim should be silent");
 
-    // Second pick (position 1) on already-consumed list
-    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:1`);
-    assert.match(sentTelegramText, /invalid or expired/);
+    // Second pick (position 1) on already-consumed list → still silent (claim blocks it)
+    sentTelegramText = "";
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:1`, claims);
+    assert.strictEqual(sentTelegramText, "", "replay on different position should be silent");
 
-    // Out-of-bounds position (list is already consumed, so same error)
-    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:99`);
-    assert.match(sentTelegramText, /invalid or expired/);
+    // Out-of-bounds position → still silent (claim blocks it before validation)
+    sentTelegramText = "";
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:99`, claims);
+    assert.strictEqual(sentTelegramText, "", "out-of-bounds on consumed list should be silent");
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("Concurrent folder selections: DO serialization ensures only one succeeds", async () => {
+test("Two genuinely overlapping folder-selection callbacks: exactly one wins", async () => {
   const { fakeEnv, mockKv } = createFakeEnv();
   const originalFetch = globalThis.fetch;
 
-  const workId = "work-concurrent-folder-600";
+  const workId = "work-concurrent-folder-700";
   // Stage a folderlist option directly
   const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
     kind: "folderlist",
@@ -576,6 +615,15 @@ test("Concurrent folder selections: DO serialization ensures only one succeeds",
   };
 
   const sentTelegramTexts: string[] = [];
+  let claimCalledCount = 0;
+
+  // Barrier: both callbacks must reach claimFolderOption before either proceeds.
+  // This creates a genuine overlap: both pass peek+validation before either
+  // attempts the atomic claim.
+  let releaseClaims: (() => void) | null = null;
+  const claimBarrier = new Promise<void>((resolve) => {
+    releaseClaims = resolve;
+  });
 
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     const u = String(url);
@@ -588,20 +636,51 @@ test("Concurrent folder selections: DO serialization ensures only one succeeds",
   }) as typeof fetch;
 
   try {
-    // In production, the WorkSession Durable Object serializes callback execution
-    // for the same workId. We simulate this by running sequentially.
-    // The atomic consumeOpaqueOption provides an additional safety layer.
-    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
-    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:1`);
+    // Stateful claims with barrier around claimFolderOption.
+    let claimStatus: FolderClaimStatus | undefined = undefined;
+    const claims = {
+      getFolderClaimStatus: async (_opaqueId: string) => claimStatus,
+      claimFolderOption: async (_opaqueId: string) => {
+        claimCalledCount++;
+        await claimBarrier; // Both callbacks wait here before deciding the winner
+        if (claimStatus) return false;
+        claimStatus = "claimed";
+        return true;
+      },
+      resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+        claimStatus = status;
+      },
+    };
 
-    // First call succeeds, second call fails (option already consumed)
-    const successMessages = sentTelegramTexts.filter((t) => t.includes("Folder One") || t.includes("Folder Two"));
-    const errorMessages = sentTelegramTexts.filter((t) => t.includes("already consumed") || t.includes("invalid or expired"));
-    assert.equal(successMessages.length, 1, "exactly one success message sent");
-    assert.equal(errorMessages.length, 1, "exactly one error message sent");
-    assert.match(successMessages[0], /concurrent@enig.com/);
+    // Launch both callbacks concurrently — they overlap through peek+validation
+    // before either reaches the atomic claim. Start both without awaiting so
+    // they are in-flight simultaneously.
+    const p1 = handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+    const p2 = handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:1`, claims);
 
-    // The list should be consumed
+    // Yield to the event loop so both callbacks reach the claimBarrier.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Release the barrier so both can proceed past claimFolderOption.
+    releaseClaims!();
+
+    await Promise.allSettled([p1, p2]);
+
+    // Both callbacks attempted the claim (genuine overlap).
+    assert.strictEqual(claimCalledCount, 2, "both callbacks reached the atomic claim");
+
+    // Exactly one Telegram message was sent (the winner). The loser sent
+    // nothing — it returned silently without any Telegram message.
+    assert.strictEqual(
+      sentTelegramTexts.length,
+      1,
+      "exactly one Telegram message sent (winner only; loser silent)",
+    );
+    const successMessage = sentTelegramTexts[0];
+    assert.match(successMessage, /Folder One|Folder Two/, "winner message names a folder");
+    assert.match(successMessage, /concurrent@enig.com/, "winner message names the account");
+
+    // Exactly one option was consumed.
     const store: Map<string, { value: string; expirationTtl?: number }> = mockKv._rawStore;
     let listExists = false;
     for (const [key, value] of store.entries()) {
@@ -610,7 +689,7 @@ test("Concurrent folder selections: DO serialization ensures only one succeeds",
         break;
       }
     }
-    assert.strictEqual(listExists, false, "folder list is consumed after sequential picks");
+    assert.strictEqual(listExists, false, "folder list is consumed after concurrent picks");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -655,7 +734,7 @@ test("Out-of-bounds position rejected while folder list still exists", async () 
 
   try {
     // Attempt out-of-bounds position while list still exists (position 99, only 1 folder)
-    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:99`);
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:99`, createMockClaims());
     assert.match(sentTelegramText, /no longer current/);
 
     // List should still exist (not consumed on invalid pick)
@@ -714,7 +793,7 @@ test("Expired folder selection state is rejected (TTL expiry)", async () => {
 
   try {
     // Attempt to select from expired/missing option
-    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
+    await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, createMockClaims());
     assert.match(sentTelegramText, /invalid or expired/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -2167,4 +2246,472 @@ test("handleGoogleActionApproval registers the created sheet for comment-trigger
   assert.strictEqual(watched.length, 1);
   assert.strictEqual(watched[0].spreadsheetId, createdSheetId);
   assert.strictEqual(watched[0].accountIdentifier, "owner@enig.com");
+});
+
+// ---------------------------------------------------------------------------
+// Stage 4B claim integration tests
+// ---------------------------------------------------------------------------
+
+test("Stage 4B: existing claimed marker → callback silently ignored", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-claim-claimed-1";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "claimed@enig.com",
+    title: "Claimed Test",
+    content: "Testing claimed marker",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    // Claim status is "claimed" → silently ignored before any peek or consume.
+    const claims = {
+      getFolderClaimStatus: async () => "claimed" as const,
+      claimFolderOption: async () => {
+        throw new Error("claimFolderOption must not be called when claim exists");
+      },
+      resolveFolderClaim: async () => {
+        throw new Error("resolveFolderClaim must not be called when claim exists");
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(sentTelegramText, "", "claimed marker: no Telegram message sent");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "claimed marker: no pending action created");
+
+    // Option must not be consumed
+    const store = mockKv._rawStore;
+    let listExists = false;
+    for (const [key, value] of store.entries()) {
+      if (key.startsWith(`google_option:${workId}:`) && value.value.includes("folderlist")) {
+        listExists = true;
+        break;
+      }
+    }
+    assert.strictEqual(listExists, true, "claimed marker: option NOT consumed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4B: existing completed marker → callback silently ignored", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-claim-completed-1";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "completed@enig.com",
+    title: "Completed Test",
+    content: "Testing completed marker",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const claims = {
+      getFolderClaimStatus: async () => "completed" as const,
+      claimFolderOption: async () => {
+        throw new Error("claimFolderOption must not be called when claim exists");
+      },
+      resolveFolderClaim: async () => {
+        throw new Error("resolveFolderClaim must not be called when claim exists");
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(sentTelegramText, "", "completed marker: no Telegram message sent");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "completed marker: no pending action created");
+
+    // Option must not be consumed
+    const store = mockKv._rawStore;
+    let listExists = false;
+    for (const [key, value] of store.entries()) {
+      if (key.startsWith(`google_option:${workId}:`) && value.value.includes("folderlist")) {
+        listExists = true;
+        break;
+      }
+    }
+    assert.strictEqual(listExists, true, "completed marker: option NOT consumed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4B: existing failed marker → callback silently ignored", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-claim-failed-1";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "failed@enig.com",
+    title: "Failed Test",
+    content: "Testing failed marker",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const claims = {
+      getFolderClaimStatus: async () => "failed" as const,
+      claimFolderOption: async () => {
+        throw new Error("claimFolderOption must not be called when claim exists");
+      },
+      resolveFolderClaim: async () => {
+        throw new Error("resolveFolderClaim must not be called when claim exists");
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(sentTelegramText, "", "failed marker: no Telegram message sent");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "failed marker: no pending action created");
+
+    // Option must not be consumed
+    const store = mockKv._rawStore;
+    let listExists = false;
+    for (const [key, value] of store.entries()) {
+      if (key.startsWith(`google_option:${workId}:`) && value.value.includes("folderlist")) {
+        listExists = true;
+        break;
+      }
+    }
+    assert.strictEqual(listExists, true, "failed marker: option NOT consumed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4B: missing or expired option → Workspace notification, no claim, no consumption", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-claim-missing-1";
+  // Do NOT stage any option — it's missing/expired
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let claimCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => {
+        claimCalled = true;
+        return true;
+      },
+      resolveFolderClaim: async () => {},
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, "nonexistent:0", claims);
+
+    assert.match(sentTelegramText, /invalid or expired/, "missing option: Workspace notification sent");
+    assert.strictEqual(claimCalled, false, "missing option: claim NOT attempted");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "missing option: no pending action");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4B: malformed option → Workspace notification, no claim, no consumption", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-claim-malformed-1";
+  // Stage a non-folderlist option
+  const opaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "account",
+    accountIdentifier: "malformed@enig.com",
+    title: "Not a folder list",
+    content: "This is not a folderlist option",
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let claimCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => {
+        claimCalled = true;
+        return true;
+      },
+      resolveFolderClaim: async () => {},
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${opaqueId}:0`, claims);
+
+    assert.match(sentTelegramText, /invalid or expired/, "malformed option: Workspace notification sent");
+    assert.strictEqual(claimCalled, false, "malformed option: claim NOT attempted");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "malformed option: no pending action");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4B: invalid folder index → Workspace notification, no claim, no consumption", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-claim-invalid-1";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "invalid@enig.com",
+    title: "Invalid Index Test",
+    content: "Testing invalid folder index",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let claimCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => {
+        claimCalled = true;
+        return true;
+      },
+      resolveFolderClaim: async () => {},
+    };
+
+    // Position 99 is out of bounds (only 1 folder at index 0)
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:99`, claims);
+
+    assert.match(sentTelegramText, /no longer current/, "invalid index: Workspace notification sent");
+    assert.strictEqual(claimCalled, false, "invalid index: claim NOT attempted");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "invalid index: no pending action");
+
+    // Option must NOT be consumed
+    const store = mockKv._rawStore;
+    let listExists = false;
+    for (const [key, value] of store.entries()) {
+      if (key.startsWith(`google_option:${workId}:`) && value.value.includes("folderlist")) {
+        listExists = true;
+        break;
+      }
+    }
+    assert.strictEqual(listExists, true, "invalid index: option NOT consumed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4B: first valid callback → claims, consumes once, continues once, preserves data", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-claim-valid-1";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "valid@enig.com",
+    title: "Valid Test Doc",
+    content: "Valid test content for document creation",
+    folders: [{ id: "folder-valid-1", name: "Valid Folder" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+  let sentButtons: any[] = [];
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      sentButtons = body.reply_markup?.inline_keyboard || [];
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let claimCalled = false;
+    let resolveCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => {
+        claimCalled = true;
+        return true;
+      },
+      resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+        resolveCalled = true;
+        assert.strictEqual(status, "completed", "claim resolved as completed");
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(claimCalled, true, "valid callback: claim attempted");
+    assert.strictEqual(resolveCalled, true, "valid callback: claim resolved as completed");
+    assert.match(sentTelegramText, /Valid Folder/, "valid callback: folder name in message");
+    assert.match(sentTelegramText, /valid@enig.com/, "valid callback: account in message");
+    assert.match(sentTelegramText, /Valid Test Doc/, "valid callback: title in message");
+    assert.strictEqual(
+      updatedState.pendingGoogleAction?.title,
+      "Valid Test Doc",
+      "valid callback: pending action title preserved",
+    );
+    assert.strictEqual(
+      updatedState.pendingGoogleAction?.folderId,
+      "folder-valid-1",
+      "valid callback: pending action folderId preserved",
+    );
+    assert.strictEqual(
+      updatedState.pendingGoogleAction?.accountIdentifier,
+      "valid@enig.com",
+      "valid callback: pending action accountIdentifier preserved",
+    );
+    assert.strictEqual(
+      sentButtons[0][0].callback_data,
+      `googleaction:${workId}:approve`,
+      "valid callback: approve button present",
+    );
+    assert.strictEqual(
+      sentButtons[0][1].callback_data,
+      `googleaction:${workId}:reject`,
+      "valid callback: reject button present",
+    );
+
+    // Option must be consumed
+    const store = mockKv._rawStore;
+    let listExists = false;
+    for (const [key, value] of store.entries()) {
+      if (key.startsWith(`google_option:${workId}:`) && value.value.includes("folderlist")) {
+        listExists = true;
+        break;
+      }
+    }
+    assert.strictEqual(listExists, false, "valid callback: option consumed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
