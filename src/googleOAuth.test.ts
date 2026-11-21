@@ -3369,17 +3369,17 @@ test("Stage 4C: Telegram network exception — unknown delivery outcome, state p
     updatedAt: new Date().toISOString(),
   };
 
-  let sentTelegramText = "";
+  let sentTelegramTexts: string[] = [];
 
   // First telegram call throws (network exception → unknown outcome).
-  // Second call (from any notification) succeeds.
+  // Second call (from the Workspace notification) succeeds.
   let telegramCallCount = 0;
   globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
     const u = String(_url);
     if (u.includes("api.telegram.org")) {
       telegramCallCount++;
       const body = _init?.body ? JSON.parse(String(_init.body)) : {};
-      sentTelegramText = body.text || "";
+      sentTelegramTexts.push(body.text || "");
       if (telegramCallCount === 1) {
         throw new Error("Telegram network exception");
       }
@@ -3403,13 +3403,211 @@ test("Stage 4C: Telegram network exception — unknown delivery outcome, state p
     const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
 
     // Unknown outcome: claim NOT resolved as failed, state preserved,
-    // no user-facing failure message (delivery could not be confirmed as failed).
+    // Workspace notification attempted, no blind retry of the original message.
     assert.strictEqual(resolveFailedCalled, false, "claim NOT resolved as failed on unknown outcome");
     assert.strictEqual(resolveCompletedCalled, false, "claim NOT resolved as completed on unknown outcome");
     assert.strictEqual(updatedState.pendingGoogleAction?.title, "Telegram Unknown Test", "state preserved — pendingGoogleAction not cleared");
     assert.strictEqual(updatedState.pendingActionSummary !== undefined, true, "state preserved — pendingActionSummary not cleared");
-    // No failure notification was sent for the unknown outcome.
-    assert.match(sentTelegramText, /Proposed Action.*Create Google Doc/, "proposal message was delivered (or attempted), not a failure notice");
+    // Proposal message was attempted (first call), then Workspace notification (second call).
+    assert.strictEqual(telegramCallCount, 2, "original message attempted once, then Workspace notification");
+    assert.match(sentTelegramTexts[0], /Proposed Action.*Create Google Doc/, "proposal message was attempted, not blindly retried");
+    assert.match(sentTelegramTexts[1], /Telegram delivery of your Google Doc proposal could not be confirmed/, "Workspace notification attempted for uncertain delivery");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: smoke path — Telegram network exception, Workspace notification attempted, state preserved", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-smoke-unknown";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    smoke: true,
+    docType: "doc",
+    accountIdentifier: "smoke-unknown@enig.com",
+    title: "Smoke Unknown Test",
+    content: "Testing smoke path unknown delivery",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramTexts: string[] = [];
+  let telegramCallCount = 0;
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      telegramCallCount++;
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      sentTelegramTexts.push(body.text || "");
+      if (telegramCallCount === 1) {
+        throw new Error("Telegram network exception");
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let resolveFailedCalled = false;
+    let resolveCompletedCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => true,
+      resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+        if (status === "failed") resolveFailedCalled = true;
+        if (status === "completed") resolveCompletedCalled = true;
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(resolveFailedCalled, false, "claim NOT resolved as failed on unknown outcome (smoke)");
+    assert.strictEqual(resolveCompletedCalled, false, "claim NOT resolved as completed on unknown outcome (smoke)");
+    assert.strictEqual(updatedState.pendingSmokeSelection?.folderId, "folder-1", "state preserved — pendingSmokeSelection not cleared (smoke)");
+    assert.strictEqual(telegramCallCount, 2, "original smoke confirmation attempted once, then Workspace notification");
+    assert.match(sentTelegramTexts[0], /GOVERNED TOOL REGISTRY SMOKE/, "smoke confirmation message was attempted, not blindly retried");
+    assert.match(sentTelegramTexts[1], /Telegram delivery of your smoke confirmation could not be confirmed/, "Workspace notification attempted for uncertain delivery (smoke)");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "no document-creation action triggered (smoke)");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: output delivery path — Telegram network exception, Workspace notification attempted, state preserved", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-delivery-unknown";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    delivery: true,
+    docType: "doc",
+    accountIdentifier: "delivery-unknown@enig.com",
+    title: "Delivery Unknown Test",
+    content: "Testing output delivery path unknown delivery",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramTexts: string[] = [];
+  let telegramCallCount = 0;
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      telegramCallCount++;
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      sentTelegramTexts.push(body.text || "");
+      if (telegramCallCount === 1) {
+        throw new Error("Telegram network exception");
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let resolveFailedCalled = false;
+    let resolveCompletedCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => true,
+      resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+        if (status === "failed") resolveFailedCalled = true;
+        if (status === "completed") resolveCompletedCalled = true;
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(resolveFailedCalled, false, "claim NOT resolved as failed on unknown outcome (delivery)");
+    assert.strictEqual(resolveCompletedCalled, false, "claim NOT resolved as completed on unknown outcome (delivery)");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "no pending action when delivery unknown (delivery)");
+    assert.strictEqual(telegramCallCount, 2, "original delivery confirmation attempted once, then Workspace notification");
+    assert.match(sentTelegramTexts[0], /Save approved output to Google Drive/, "delivery confirmation message was attempted, not blindly retried");
+    assert.match(sentTelegramTexts[1], /Telegram delivery of your output-delivery confirmation could not be confirmed/, "Workspace notification attempted for uncertain delivery (delivery)");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "no document-creation action triggered (delivery)");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: sheet proposal path — Telegram network exception, Workspace notification attempted, state preserved", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-sheet-unknown";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "sheet",
+    accountIdentifier: "sheet-unknown@enig.com",
+    title: "Sheet Unknown Test",
+    content: "Testing sheet path unknown delivery",
+    rows: [["A1", "B1"], ["A2", "B2"]],
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramTexts: string[] = [];
+  let telegramCallCount = 0;
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      telegramCallCount++;
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      sentTelegramTexts.push(body.text || "");
+      if (telegramCallCount === 1) {
+        throw new Error("Telegram network exception");
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let resolveFailedCalled = false;
+    let resolveCompletedCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => true,
+      resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+        if (status === "failed") resolveFailedCalled = true;
+        if (status === "completed") resolveCompletedCalled = true;
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(resolveFailedCalled, false, "claim NOT resolved as failed on unknown outcome (sheet)");
+    assert.strictEqual(resolveCompletedCalled, false, "claim NOT resolved as completed on unknown outcome (sheet)");
+    assert.strictEqual(updatedState.pendingGoogleAction?.type, "create_sheet", "state preserved — pendingGoogleAction not cleared (sheet)");
+    assert.strictEqual(updatedState.pendingActionSummary !== undefined, true, "state preserved — pendingActionSummary not cleared (sheet)");
+    assert.strictEqual(telegramCallCount, 2, "original sheet proposal attempted once, then Workspace notification");
+    assert.match(sentTelegramTexts[0], /Proposed Action.*Create Google Sheet/, "sheet proposal message was attempted, not blindly retried");
+    assert.match(sentTelegramTexts[1], /Telegram delivery of your Google Sheet proposal could not be confirmed/, "Workspace notification attempted for uncertain delivery (sheet)");
+    assert.match(sentTelegramTexts[1], /No Google Sheet has been created yet/, "notification states no document created (sheet)");
   } finally {
     globalThis.fetch = originalFetch;
   }

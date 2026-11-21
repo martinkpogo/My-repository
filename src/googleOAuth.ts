@@ -2200,6 +2200,7 @@ export async function handleGoogleFolderSelection(
       // button that WAS delivered can still be honoured. The claim
       // remains "claimed" and protected against duplicate callbacks.
       console.error(`Folder selection: Telegram delivery outcome unknown (network exception) for work ${state.workId}`);
+      await notifyWorkspaceTaskError("⚠️ Telegram delivery of your smoke confirmation could not be confirmed. No Google Doc has been created yet. Please check whether the confirmation message arrived before retrying the folder step or starting a fresh /googledocssmoke flow.");
       return state;
     }
 
@@ -2277,6 +2278,7 @@ export async function handleGoogleFolderSelection(
       // attempted. Do not blindly retry, do not clear state, do not
       // resolve the claim as "failed". Preserve state.
       console.error(`Folder selection: Telegram delivery outcome unknown (network exception) for work ${state.workId}`);
+      await notifyWorkspaceTaskError("⚠️ Telegram delivery of your output-delivery confirmation could not be confirmed. No Google Doc has been created yet. Please check whether the confirmation message arrived before retrying.");
       return state;
     }
 
@@ -2337,6 +2339,7 @@ export async function handleGoogleFolderSelection(
       // attempted. Do not blindly retry, do not clear state, do not
       // resolve the claim as "failed". Preserve state.
       console.error(`Folder selection: Telegram delivery outcome unknown (network exception) for work ${state.workId}`);
+      await notifyWorkspaceTaskError("⚠️ Telegram delivery of your Google Sheet proposal could not be confirmed. No Google Sheet has been created yet. Please check whether the proposal message arrived before retrying.");
       return state;
     }
 
@@ -2386,6 +2389,7 @@ export async function handleGoogleFolderSelection(
     // attempted. Do not blindly retry, do not clear state, do not
     // resolve the claim as "failed". Preserve state.
     console.error(`Folder selection: Telegram delivery outcome unknown (network exception) for work ${state.workId}`);
+    await notifyWorkspaceTaskError("⚠️ Telegram delivery of your Google Doc proposal could not be confirmed. No Google Doc has been created yet. Please check whether the proposal message arrived before retrying.");
     return state;
   }
 
