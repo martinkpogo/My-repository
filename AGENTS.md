@@ -226,6 +226,12 @@ Profiles are living evidence records, not fixed assessments.
 
 Observed ENIG work is the initial evidence base. These are demonstrated observations, appropriately qualified:
 
+**Attribution of these observations**
+
+- The execution environment and the underlying model, provider and routing information for these historical observations are **unknown wherever they cannot be reliably established**, and are recorded as unknown rather than guessed.
+- The strengths and weaknesses listed below are **observed outcomes while using Kilo Code**. They are not proof that those characteristics belong to Kilo independently of the underlying model or execution environment.
+- No historical model identity is invented here, and no behaviour is retrospectively attributed to a particular model.
+
 **Strengths**
 
 - Bounded TypeScript implementation.
