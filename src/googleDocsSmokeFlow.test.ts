@@ -76,6 +76,8 @@ function fakeEnv(seed: Record<string, string> = {}) {
     TELEGRAM_GROUP_CHAT_ID: "111",
     WORKSPACE_TOPIC_ID: "222",
     BOT_TOKEN: "test-token",
+    ACTIVITY_LOG_DATA_SOURCE_ID: "mock-activity-log-ds",
+    NOTION_TOKEN: "mock-notion-token",
     STATE_KV: {
       get: async (key: string) => store.get(key) ?? null,
       put: async (key: string, value: string) => {
