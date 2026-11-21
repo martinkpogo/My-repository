@@ -43,5 +43,8 @@ export async function logActivity(env: Env, input: LogEntryInput): Promise<void>
     );
   } catch (err) {
     console.error("Activity & Decision Log write failed", err, input);
+    if (process.env.ENIG_LOG_ACTIVITY_THROW === "true") {
+      throw err;
+    }
   }
 }
