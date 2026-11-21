@@ -80,6 +80,118 @@ Every production Handoff write goes through `src/handoffWriter.ts`'s `createHand
 - No agent may redesign ENIG architecture, modify runtime behavior outside authorization, alter provider policy, introduce data-boundary logic, or reinterpret existing governance.
 - All five agents must stop and report when a new architectural, governance, authority, security-boundary, provider-eligibility, or business-policy decision is required rather than inventing a rule.
 
+## Architect's Agent Delegation Guide
+
+This section is **Architect guidance**. It tells the Architect how to delegate work to the coding agents; it is not an execution contract, a permission, or a restriction on any coding agent, and it changes none of the contracts, permissions, or restrictions elsewhere in this document. It governs how instructions are prepared for an agent — never what ENIG requires of the work.
+
+### Agent availability and selection
+
+- Martin chooses which coding agent is available for a task; agent availability is affected by usage limits, and Martin selects whichever agent is currently available.
+- The Architect must not rank agents or independently select one on Martin's behalf, and must not assign permanent categories of work to individual agents.
+- If Martin has not identified the agent and the identity materially affects preparation of the handoff, the Architect asks him before preparing the implementation instruction.
+- Once the agent is known, the Architect consults that agent's existing execution contract (below) and its demonstrated profile before preparing instructions.
+
+### Evidence-based agent profiles
+
+The Architect maintains a profile for each agent as practical experience accumulates. Profiles capture:
+
+- Agent identity and execution environment.
+- Demonstrated strengths and limitations.
+- Available tools and repository access.
+- Context-window and context-retention behaviour, where established.
+- Repository navigation and code-editing behaviour.
+- Test execution and debugging capabilities.
+- GitHub, issue and PR interaction capabilities.
+- Effective prompt and instruction conventions.
+- How well the agent handles staged work and complex context.
+- Recurring reliability problems and observed failure patterns.
+- Reporting and handback behaviour.
+- Supporting evidence and last-reviewed date.
+
+Rules for profiles:
+
+- Do not invent profiles for agents without sufficient evidence.
+- Distinguish recurring patterns from isolated mistakes.
+- Profiles must be updated as new evidence accumulates.
+
+### Agent-adaptive delegation
+
+The Architect adapts the handoff to the actual agent being used. Where appropriate, adapt:
+
+- Prompt structure and level of instruction detail.
+- Context provided and how it is organized.
+- Task size and decomposition.
+- Whether investigation and implementation should be separate stages.
+- How existing implementation and production paths must be traced.
+- Tool-use instructions and expected repository workflow.
+- Failure cases and integration boundaries that require explicit attention.
+- Test execution and verification instructions.
+- Reporting format and GitHub handback expectations.
+
+Do not impose one rigid prompt format or task decomposition method on every agent. For example, Kilo Code may benefit from explicit staged instructions, while another agent may work more effectively from a different instruction structure — such differences are established through observed work, not assumptions.
+
+### Consistent ENIG standards
+
+Adaptation changes how work is delegated, not what ENIG requires. Every agent remains bound by:
+
+- The same approved architecture and governance.
+- The same security and identity boundaries.
+- The same approved task scope and no-change scope.
+- The same authority and approval requirements.
+- The same acceptance criteria.
+- The same requirement to discover existing mechanisms before implementing.
+- The same independent verification expectations.
+- The same GitHub reporting and PR lifecycle restrictions.
+
+Agent-specific profiles must never weaken, replace or contradict existing execution contracts.
+
+### Compensation for demonstrated weaknesses
+
+When an agent has demonstrated a recurring weakness, the Architect explicitly accounts for it in future handoffs. For example, if an agent has repeatedly missed intermediate failure states, its instructions may require explicit tracing of partial failures, retries, concurrency and callback interactions.
+
+Do not turn every isolated mistake into a permanent profile characteristic.
+
+### Independent verification
+
+An agent's completion report is not proof. The Architect independently verifies the actual implementation, scope, existing patterns, failure handling, tests and claimed results. Verification depth accounts for task risk and the selected agent's demonstrated reliability.
+
+### Profile maintenance
+
+Profiles are living evidence records, not fixed assessments.
+
+- Record changes only when supported by actual ENIG work.
+- Do not assume an agent's capabilities from marketing claims or general reputation.
+- Do not create unsupported profiles for Claude Code, OpenCode, Jules or Cline; build them as actual work provides evidence.
+
+### Initial Kilo Code profile
+
+Observed ENIG work is the initial evidence base. These are demonstrated observations, appropriately qualified:
+
+**Strengths**
+
+- Bounded TypeScript implementation.
+- Executing clearly specified changes.
+- Working through explicit staged instructions.
+
+**Recurring weaknesses observed**
+
+- Sometimes fixing local symptoms without adequately tracing the complete production path.
+- Missing intermediate failure states involving partial failures, retries, concurrency and callback interactions.
+- Occasionally reporting verification more confidently than the available evidence supports.
+
+**Delegation adaptations**
+
+- Use appropriately bounded implementation tasks.
+- Make production-path and failure-state investigation explicit where relevant.
+- Break broad investigations into manageable stages.
+- Independently verify integration boundaries and reported test results.
+
+These observations describe demonstrated ENIG work, not universal characteristics of Kilo. They do not create a ranking or declare Kilo suitable or unsuitable for permanent categories of work.
+
+### Governing principle for delegation
+
+The ENIG Architect adapts delegation to the agent Martin has chosen. The agent does not determine ENIG's engineering standards, architecture, authority or governance. Different agents may receive different instructions for the same underlying task; the required outcome and governing constraints remain identical.
+
 ## ENIG Runtime Architecture — mandatory reading
 
 `docs/enig-operating-model.md` is the authoritative, binding description of ENIG Runtime's architecture (Units/Hats/Actions, the Action Registry, the Unit Manifest pattern, and Chat/Cowork dispatch semantics), not a proposal or background reading. Before creating or modifying a Unit, Hat, or Action, or touching `src/router.ts`, `src/units/dispatch.ts`, `src/units/unitManifest.ts`, `src/hats/actionRegistry.ts`, or dispatch/Handoff-adjacent code in `src/session.ts`, read that document.
