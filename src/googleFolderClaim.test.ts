@@ -134,47 +134,107 @@ test("googleFolderClaim: failed claim remains unavailable during retention", asy
   assert.strictEqual(claimAgain, false, "failed claim blocks re-claim");
 });
 
-test("googleFolderClaim: expired completed record can be replaced by new claim", async () => {
+test("googleFolderClaim: expired completed record can be reclaimed via claim directly", async () => {
   const storage = createMockDurableObjectStorage();
   const originalNow = Date.now;
   try {
-    // Set clock to T=0
     Date.now = () => 0 as unknown as number;
 
-    await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-expirable");
-    await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-expirable", "completed");
+    await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-exp-complete");
+    await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-exp-complete", "completed");
 
-    // Advance clock past retention (24h + 1ms)
+    // Advance clock past retention (24h + 1ms). Do NOT call getFolderClaimStatusOnStorage first.
     Date.now = () => (24 * 60 * 60 * 1000 + 1) as unknown as number;
 
-    // Status should be undefined (lazily expired and deleted)
-    const status = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-expirable");
-    assert.strictEqual(status, undefined, "expired completed record should be gone");
+    // claimFolderOptionOnStorage must handle expiry internally and replace the marker.
+    const claimAgain = await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-exp-complete");
+    assert.strictEqual(claimAgain, true, "expired completed record can be reclaimed via claim directly");
 
-    // A new claim should succeed
-    const claimAgain = await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-expirable");
-    assert.strictEqual(claimAgain, true, "expired record can be reclaimed");
+    // Verify the record is now claimed (not completed).
+    const status = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-exp-complete");
+    assert.strictEqual(status, "claimed", "record should now be claimed");
   } finally {
     Date.now = originalNow;
   }
 });
 
-test("googleFolderClaim: expired failed record can be replaced by new claim", async () => {
+test("googleFolderClaim: expired failed record can be reclaimed via claim directly", async () => {
   const storage = createMockDurableObjectStorage();
   const originalNow = Date.now;
   try {
     Date.now = () => 0 as unknown as number;
 
-    await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-failed-expirable");
-    await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-failed-expirable", "failed");
+    await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-exp-failed");
+    await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-exp-failed", "failed");
 
+    // Advance clock past retention (24h + 1ms). Do NOT call getFolderClaimStatusOnStorage first.
     Date.now = () => (24 * 60 * 60 * 1000 + 1) as unknown as number;
 
-    const status = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-failed-expirable");
-    assert.strictEqual(status, undefined, "expired failed record should be gone");
+    const claimAgain = await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-exp-failed");
+    assert.strictEqual(claimAgain, true, "expired failed record can be reclaimed via claim directly");
 
-    const claimAgain = await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-failed-expirable");
-    assert.strictEqual(claimAgain, true, "expired failed record can be reclaimed");
+    const status = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-exp-failed");
+    assert.strictEqual(status, "claimed", "record should now be claimed");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("googleFolderClaim: completed marker cannot be overwritten by failed resolution", async () => {
+  const storage = createMockDurableObjectStorage();
+  await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-terminal-complete");
+  await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-terminal-complete", "completed");
+
+  // Attempt to transition completed → failed: must be a no-op.
+  await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-terminal-complete", "failed");
+
+  const status = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-terminal-complete");
+  assert.strictEqual(status, "completed", "completed marker must not be overwritten to failed");
+});
+
+test("googleFolderClaim: failed marker cannot be overwritten by completed resolution", async () => {
+  const storage = createMockDurableObjectStorage();
+  await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-terminal-failed");
+  await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-terminal-failed", "failed");
+
+  // Attempt to transition failed → completed: must be a no-op.
+  await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-terminal-failed", "completed");
+
+  const status = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-terminal-failed");
+  assert.strictEqual(status, "failed", "failed marker must not be overwritten to completed");
+});
+
+test("googleFolderClaim: two concurrent attempts to replace an expired marker produce exactly one claimant", async () => {
+  const storage = createMockDurableObjectStorage();
+  const originalNow = Date.now;
+  try {
+    Date.now = () => 0 as unknown as number;
+
+    // Seed a completed marker that is past retention.
+    await claimFolderOptionOnStorage(storage as unknown as DurableObjectStorage, "opaque-exp-race");
+    await resolveFolderClaimOnStorage(storage as unknown as DurableObjectStorage, "opaque-exp-race", "completed");
+    Date.now = () => (24 * 60 * 60 * 1000 + 1) as unknown as number;
+
+    const results = await claimTwiceConcurrently(storage, "opaque-exp-race");
+    const successes = results.filter((r) => r.status === "fulfilled" && r.value === true);
+    const failures = results.filter((r) => r.status === "fulfilled" && r.value === false);
+    const rejections = results.filter((r) => r.status === "rejected");
+
+    assert.strictEqual(
+      successes.length,
+      1,
+      "exactly one concurrent replacement claim should succeed",
+    );
+    assert.strictEqual(
+      failures.length,
+      1,
+      "the losing replacement claim should return false",
+    );
+    assert.strictEqual(rejections.length, 0, "no claim should throw");
+
+    // Verify the record is claimed (not completed).
+    const status = await getFolderClaimStatusOnStorage(storage as unknown as DurableObjectStorage, "opaque-exp-race");
+    assert.strictEqual(status, "claimed", "record should be claimed after concurrent replacement");
   } finally {
     Date.now = originalNow;
   }

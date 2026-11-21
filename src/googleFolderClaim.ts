@@ -26,8 +26,19 @@ export type FolderClaimStatus = "claimed" | "completed" | "failed";
 
 /**
  * Atomically claims a folder-selection option. Returns true if the claim was
- * granted (no existing claim marker for this opaqueId), false if a marker
- * already exists (claimed, completed, or failed).
+ * granted, false if an existing marker still blocks it.
+ *
+ * Inside one storage.transaction():
+ *   - No marker exists → create a claimed marker, return true.
+ *   - Marker is completed or failed and older than CLAIM_RETENTION_MS →
+ *     replace it with a new claimed marker, return true.
+ *   - Marker is still within retention → return false.
+ *   - Marker is claimed → return false regardless of age (claimed records
+ *     are never auto-released).
+ *
+ * The expiry check, replacement, and new claim happen within one
+ * transaction — no gap between deleting an expired marker and claiming
+ * its replacement.
  *
  * Uses storage.transaction() so exactly one caller can succeed even under
  * concurrent delivery: the transaction's check-and-set is atomic within the
@@ -41,16 +52,32 @@ export async function claimFolderOptionOnStorage(
   opaqueId: string,
 ): Promise<boolean> {
   const key = `${GOOGLE_FOLDER_CLAIM_KEY_PREFIX}${opaqueId}`;
+  const now = Date.now();
   return await storage.transaction(async (txn) => {
     const existing = await txn.get<FolderClaimRecord>(key);
-    if (existing) return false;
-    await txn.put(key, { status: "claimed", createdAt: Date.now() });
-    return true;
+    if (!existing) {
+      await txn.put(key, { status: "claimed", createdAt: now });
+      return true;
+    }
+    // A claimed record is never auto-released, regardless of age.
+    if (existing.status === "claimed") return false;
+    // Completed or failed markers may be reclaimed after retention expires.
+    if (
+      existing.resolvedAt !== undefined &&
+      now - existing.resolvedAt > CLAIM_RETENTION_MS
+    ) {
+      await txn.put(key, { status: "claimed", createdAt: now });
+      return true;
+    }
+    // Still within retention: block the claim.
+    return false;
   });
 }
 
 /**
  * Resolves an existing claim marker to completed or failed status.
+ * Only transitions from "claimed" to the given terminal status.
+ * If the record is already completed or failed, it is not overwritten.
  * No-op if no claim marker exists for this opaqueId.
  */
 export async function resolveFolderClaimOnStorage(
@@ -62,6 +89,7 @@ export async function resolveFolderClaimOnStorage(
   await storage.transaction(async (txn) => {
     const existing = await txn.get<FolderClaimRecord>(key);
     if (!existing) return;
+    if (existing.status !== "claimed") return;
     await txn.put(key, { ...existing, status, resolvedAt: Date.now() });
   });
 }
