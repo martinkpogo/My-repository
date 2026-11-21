@@ -70,6 +70,12 @@ import {
 import type { InlineButton } from "./telegram";
 import { runWithAdoptedOwnership } from "./handoffOwnership";
 import { ensureMatterIdentity, isTerminalWorkStage, syncMatterContinuationPointer } from "./matterContinuation";
+import {
+  claimFolderOptionOnStorage,
+  resolveFolderClaimOnStorage,
+  getFolderClaimStatusOnStorage,
+  type FolderClaimStatus,
+} from "./googleFolderClaim";
 import { findUnitManifest, findCallbackPrefixOwner } from "./units/registry";
 import { findCallbackHandler } from "./units/unitManifest";
 import { recordWorkAction } from "./units/dispatch";
@@ -818,7 +824,7 @@ export class WorkSession extends DurableObject<Env> {
         case "googleaccount":
           return handleGoogleAccountSelection(this.env, state, value);
         case "googlefolder":
-          return handleGoogleFolderSelection(this.env, state, value);
+          return handleGoogleFolderSelection(this.env, state, value, this);
         case "googleaction":
           return handleGoogleActionApproval(this.env, state, value === "approve");
         case RESEARCH_WORK_CALLBACK:
@@ -1356,5 +1362,41 @@ export class WorkSession extends DurableObject<Env> {
     await kvPut(this.env, key, String(Date.now())).catch((err) =>
       console.error("Failed to record pending-approval backlog alert timestamp", err),
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Google Drive folder-selection claim primitives (Stage 4A).
+  // These establish an atomic, transaction-backed claim on a staged
+  // folder-selection option stored in KV/Turso (google_option: keys). The
+  // claim marker itself lives in this WorkSession's DO storage, scoped to
+  // the opaque folder-option ID. The actual folder-list payload is never
+  // migrated into DO storage.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Atomically claims a folder-selection option. Returns true if the claim
+   * was granted (no existing claim marker), false if a marker already exists.
+   * Exactly one caller can succeed per opaqueId, even under concurrent
+   * delivery, because the check-and-set runs inside storage.transaction().
+   */
+  async claimFolderOption(opaqueId: string): Promise<boolean> {
+    return claimFolderOptionOnStorage(this.ctx.storage, opaqueId);
+  }
+
+  /**
+   * Resolves an existing claim marker to completed or failed status.
+   * No-op if no claim marker exists for this opaqueId.
+   */
+  async resolveFolderClaim(opaqueId: string, status: "completed" | "failed"): Promise<void> {
+    return resolveFolderClaimOnStorage(this.ctx.storage, opaqueId, status);
+  }
+
+  /**
+   * Reads the claim status for an opaqueId. Completed and failed records
+   * older than CLAIM_RETENTION_MS are lazily deleted on access. Claimed
+   * records are never auto-released regardless of age.
+   */
+  async getFolderClaimStatus(opaqueId: string): Promise<FolderClaimStatus | undefined> {
+    return getFolderClaimStatusOnStorage(this.ctx.storage, opaqueId);
   }
 }

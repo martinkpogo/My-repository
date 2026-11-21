@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import type { Env, WorkState } from "./types";
+import type { FolderClaimStatus } from "./googleFolderClaim";
 import { handleGoogleAccountSelection, handleGoogleActionApproval, handleGoogleFolderSelection, saveOpaqueOption } from "./googleOAuth";
 import { getActiveWorkId } from "./sessionRouting";
 import { confirmGoogleDocsSmoke, startGoogleDocsSmokeFlow, type GoogleDocsSmokeConfirmSeams } from "./googleDocsSmokeFlow";
@@ -43,6 +44,26 @@ const ACCOUNT = "martin@example.com";
 const SECOND_ACCOUNT = "second@example.com";
 const FOLDER_ID = "folder-disposable-1";
 const FOLDER_NAME = "Smoke Disposable Folder";
+
+/**
+ * Mock Stage 4A claim methods for smoke-flow tests. Defaults: no existing
+ * claim (status undefined), claim succeeds (returns true), resolve no-op.
+ */
+function createMockClaims(overrides?: {
+  getFolderClaimStatus?: (opaqueId: string) => Promise<FolderClaimStatus | undefined>;
+  claimFolderOption?: (opaqueId: string) => Promise<boolean>;
+  resolveFolderClaim?: (opaqueId: string, status: "completed" | "failed") => Promise<void>;
+}): {
+  getFolderClaimStatus: (opaqueId: string) => Promise<FolderClaimStatus | undefined>;
+  claimFolderOption: (opaqueId: string) => Promise<boolean>;
+  resolveFolderClaim: (opaqueId: string, status: "completed" | "failed") => Promise<void>;
+} {
+  return {
+    getFolderClaimStatus: overrides?.getFolderClaimStatus ?? (async () => undefined),
+    claimFolderOption: overrides?.claimFolderOption ?? (async () => true),
+    resolveFolderClaim: overrides?.resolveFolderClaim ?? (async () => {}),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures (mirror googleDocsSmoke.test.ts's, plus Telegram + DO stubs).
@@ -371,7 +392,7 @@ test("smoke folder selection records the pending selection and stages only the e
     accountIdentifier: ACCOUNT,
     folders: [{ id: FOLDER_ID, name: FOLDER_NAME }],
   });
-  const next = await handleGoogleFolderSelection(env, state, `${listOpaqueId}:0`);
+  const next = await handleGoogleFolderSelection(env, state, `${listOpaqueId}:0`, createMockClaims());
 
   // The discriminator is now ALSO in Work state, bound to this target.
   assert.deepEqual(
@@ -420,7 +441,7 @@ test("normal folder selection regression: without the smoke flag the approval pa
     content: "Body",
     folders: [{ id: FOLDER_ID, name: FOLDER_NAME }],
   });
-  const next = await handleGoogleFolderSelection(env, state, `${listOpaqueId}:0`);
+  const next = await handleGoogleFolderSelection(env, state, `${listOpaqueId}:0`, createMockClaims());
 
   assert.equal(next.pendingSmokeSelection, undefined, "the normal path must never touch the smoke state");
   assert.equal(next.pendingGoogleAction?.type, "create_doc");
@@ -759,7 +780,7 @@ test("every callback_data shape the smoke flow can stage or emit -- account, fol
   const folderOptionKey = optionKeys(env, workId).find((k) => JSON.parse(store(env).get(k) as string).kind === "folderlist");
   assert.ok(folderOptionKey, "the folder list option must have been staged");
   const folderOptionId = String(folderOptionKey.split(":").pop());
-  await handleGoogleFolderSelection(env, state, `${folderOptionId}:0`);
+  await handleGoogleFolderSelection(env, state, `${folderOptionId}:0`, createMockClaims());
   capture("googlesmokeconfirm");
 
   // Stage 4 -- the /sessions row for this still-open smoke Work, built in
@@ -889,7 +910,7 @@ test("an immediately delivered picker records the successful initiation exactly 
   assert.match(activities[0].activity ?? "", /authorized-account selection presented/);
 });
 
-test("50 Drive folders cost ONE storage write, and the first page shows 10 plus More folders (2026-11-18: one write per folder hit the subrequest limit)", async (t: any) => {
+test("50 Drive folders cost ONE storage write, and the continuous list shows all folders without More folders button", async (t: any) => {
   const workId = "8a1d4c2e-0000-4000-8000-000000000050";
   const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
   const state = smokeState(workId, { unit: undefined, hat: undefined, actionName: undefined });
@@ -906,6 +927,10 @@ test("50 Drive folders cost ONE storage write, and the first page shows 10 plus 
   await handleGoogleAccountSelection(env, state, opaqueId);
   assert.equal(optionWrites, 1, "the whole folder list is one staged option");
   const folderButtons = callbackDatas(telegram).filter((d) => d.startsWith(`googlefolder:${workId}:`));
-  assert.ok(folderButtons.length <= 11, `at most 10 folders plus More folders on the first page, got ${folderButtons.length}`);
-  assert.ok(telegramTexts(telegram).includes("More folders") || JSON.stringify(telegram).includes("More folders"), "a More folders button is offered");
+  // Now shows all 50 folders (up to MAX_FOLDERS_PER_PICKER) in a single message
+  assert.equal(folderButtons.length, 50, `shows all 50 folders in continuous list, got ${folderButtons.length}`);
+  // No "More folders" button - continuous scrolling experience restored
+  assert.ok(!telegramTexts(telegram).includes("More folders") && !JSON.stringify(telegram).includes("More folders"), "no More folders button");
+  // Shows note about total folders when at limit
+  assert.ok(telegramTexts(telegram).includes("Showing 50 of 50 folders"), "shows folder count note");
 });

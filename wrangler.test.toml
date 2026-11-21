@@ -1,0 +1,34 @@
+name = "enig-agent-test"
+main = "src/test-harness/workSessionRuntimeEntry.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = false
+
+[[durable_objects.bindings]]
+name = "WORK_SESSION"
+class_name = "WorkSession"
+
+[exports.WorkSession]
+type = "durable-object"
+storage = "sqlite"
+
+[[kv_namespaces]]
+binding = "STATE_KV"
+id = "test-local-kv-placeholder"
+
+[vars]
+NOTION_VERSION = "2025-09-03"
+AI_MODEL_PRIMARY = "test"
+AI_MODEL_LIGHT = "test"
+ENTITY_DATA_SOURCE_ID = "test"
+MATTERS_DATA_SOURCE_ID = "test"
+PROPOSALS_DATA_SOURCE_ID = "test"
+HANDOFFS_DATA_SOURCE_ID = "test"
+ACTIVITY_LOG_DATA_SOURCE_ID = "test"
+LEADS_DATA_SOURCE_ID = "test"
+CALL_NOTES_DATA_SOURCE_ID = "test"
+TELEGRAM_BOT_TOKEN = "test"
+MARTIN_TELEGRAM_USER_ID = "test"
+NOTION_TOKEN = "test"

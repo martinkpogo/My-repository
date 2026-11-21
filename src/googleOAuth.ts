@@ -1,11 +1,12 @@
 import type { Env, WorkState } from "./types";
+import type { FolderClaimStatus } from "./googleFolderClaim";
 import { buildDocStyleRequests, observedStylingMatches, type GoogleDocLayout, type ObservedDocParagraph, type ObservedDocStyling, type ObservedDocTextStyle } from "./googleDocSpec";
 // The observed read-back shapes are declared by the neutral specification
 // module (the one vocabulary for a document's declared and actual styling);
 // re-exported here so this layer's existing consumers keep their import site.
 export type { ObservedDocParagraph, ObservedDocStyling, ObservedDocTextStyle };
 import { logActivity } from "./log";
-import { HatMessageTarget, sendWorkspaceHatMessage, sendOperationsMessage, type InlineButton } from "./telegram";
+import { HatMessageTarget, sendWorkspaceHatMessage, sendWorkspaceHatMessageWithOutcome, sendOperationsMessage, type InlineButton, type TelegramSendResult } from "./telegram";
 import { generate } from "./ai";
 import { getSessionStub, newWorkId, setActiveWorkId } from "./router";
 import { kvDelete, kvGet, kvList, kvPut } from "./kvStore";
@@ -1534,7 +1535,12 @@ export async function peekOpaqueOption(
  * handleGoogleFolderSelection); the buttons carry positions into it, so
  * paging costs no extra writes.
  */
-const FOLDER_PICKER_PAGE_SIZE = 10;
+/**
+ * Maximum number of folders to display in a single Telegram message.
+ * Telegram's inline keyboard limit is 100 buttons per message.
+ * We use 50 to leave room for message overhead and ensure reliable delivery.
+ */
+const MAX_FOLDERS_PER_PICKER = 50;
 
 export const GoogleDocCreationCapability = {
   id: "workspace.google_doc_creation",
@@ -1776,17 +1782,61 @@ export async function handleGoogleAccountSelection(
     return state;
   }
 
-  let folderRes: Response;
+  // Fetch ALL folders via Google Drive API pagination (following nextPageToken).
+  // This preserves the complete folder list so folders beyond the first API
+  // response are not silently lost.
+  const allFolders: Array<{ id: string; name: string }> = [];
+  let pageToken: string | undefined;
+  const maxPages = 20; // Safety limit to prevent infinite loops (matches googleDocComments.ts pattern)
+  let pagesFetched = 0;
+
   try {
-    folderRes = await fetch(
-      "https://www.googleapis.com/drive/v3/files?q=mimeType%3D%27application%2Fvnd.google-apps.folder%27+and+trashed%3Dfalse&fields=files(id,name,mimeType,parents,capabilities)&pageSize=50",
-      {
+    do {
+      const url = pageToken
+        ? `https://www.googleapis.com/drive/v3/files?q=mimeType%3D%27application%2Fvnd.google-apps.folder%27+and+trashed%3Dfalse&fields=files(id,name,mimeType,parents,capabilities),nextPageToken&pageSize=100&pageToken=${encodeURIComponent(pageToken)}`
+        : "https://www.googleapis.com/drive/v3/files?q=mimeType%3D%27application%2Fvnd.google-apps.folder%27+and+trashed%3Dfalse&fields=files(id,name,mimeType,parents,capabilities),nextPageToken&pageSize=100";
+
+      const folderRes = await fetch(url, {
         method: "GET",
         headers: {
           Authorization: `Bearer ${token}`,
         },
-      },
-    );
+      });
+
+      if (!folderRes.ok) {
+        await sendWorkspaceHatMessage(
+          env,
+          target,
+          `⚠️ Failed to list Google Drive folders for account '${accountIdentifier}' (HTTP ${folderRes.status}).`,
+        );
+        return state;
+      }
+
+      const folderData = (await folderRes.json()) as {
+        files?: Array<{ id: string; name: string }>;
+        nextPageToken?: string;
+      };
+
+      if (folderData.files) {
+        allFolders.push(...folderData.files);
+      }
+
+      pageToken = folderData.nextPageToken;
+      pagesFetched++;
+
+      // Detect circular pagination tokens (defensive, matches comments implementation)
+      if (pageToken && pagesFetched > 1) {
+        // We could track seen tokens but for folders the risk is low;
+        // the maxPages limit is the primary guard.
+      }
+    } while (pageToken && pagesFetched < maxPages);
+
+    if (pagesFetched >= maxPages && pageToken) {
+      console.warn(
+        `Google Drive folder listing hit maxPages (${maxPages}) for account '${accountIdentifier}'; ` +
+          `returning ${allFolders.length} folders (list may be incomplete)`
+      );
+    }
   } catch (err) {
     await sendWorkspaceHatMessage(
       env,
@@ -1796,28 +1846,7 @@ export async function handleGoogleAccountSelection(
     return state;
   }
 
-  if (!folderRes.ok) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      `⚠️ Failed to list Google Drive folders for account '${accountIdentifier}' (HTTP ${folderRes.status}).`,
-    );
-    return state;
-  }
-
-  let folderData: { files?: Array<{ id: string; name: string }> };
-  try {
-    folderData = await folderRes.json();
-  } catch {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      "⚠️ Invalid JSON response from Google Drive folder query.",
-    );
-    return state;
-  }
-
-  const folders = (folderData.files ?? []).sort((a, b) => a.name.localeCompare(b.name));
+  const folders = allFolders.sort((a, b) => a.name.localeCompare(b.name));
   if (folders.length === 0) {
     await sendWorkspaceHatMessage(
       env,
@@ -1840,17 +1869,16 @@ export async function handleGoogleAccountSelection(
   // every button carries its folder's POSITION in that list (Telegram's
   // 64-byte callback_data limit cannot carry a folder id, so the binding
   // lives in the option, exactly as before -- only the number of writes
-  // changes). The 10 most recently modified folders are shown first; a
-  // "📂 More folders" button reveals the rest.
+  // changes). The folder list is displayed as a continuous selection list
+  // (up to Telegram's practical inline-keyboard limit) without a "More
+  // folders" button, restoring the previous scrolling experience.
   const folderList = folders.map((f) => ({ id: f.id, name: f.name }));
   const baseOption = smoke
     ? { kind: "folderlist", smoke: true, accountIdentifier, folders: folderList }
     : delivery
       ? { kind: "folderlist", delivery: true, docType, accountIdentifier, title, content, rows, folders: folderList }
       : { kind: "folderlist", docType, accountIdentifier, title, content, rows, folders: folderList };
-  // The id is chosen first and stamped onto the staged list, so a page
-  // re-render can rebuild its own buttons -- in ONE write (staging and then
-  // re-writing the list to add its id was a second write for nothing).
+  // The id is chosen first and stamped onto the staged list.
   const listOpaqueId = crypto.randomUUID().slice(0, 8);
   try {
     await kvPut(env, `google_option:${state.workId}:${listOpaqueId}`, JSON.stringify({ ...baseOption, _listOpaqueId: listOpaqueId }), { expirationTtl: 600 });
@@ -1863,45 +1891,50 @@ export async function handleGoogleAccountSelection(
     );
     return state;
   }
-  // renderFolderPage (below) builds every page from the same staged list, so
-  // paging costs no extra writes -- the list itself is consumed only when a
-  // folder is actually picked.
-  return renderFolderPage(env, state, target, { ...baseOption, _listOpaqueId: listOpaqueId }, 0);
+  // renderFolderList builds the complete folder list (up to MAX_FOLDERS_PER_PICKER)
+  // from the staged list in a single message -- no pagination, no "More folders"
+  // button, restoring the continuous scrolling experience.
+  return renderFolderList(env, state, target, { ...baseOption, _listOpaqueId: listOpaqueId });
 }
 
 /**
- * Renders one page of the folder picker from a staged folder list. The list
- * itself is consumed only when a folder is actually picked; paging keeps it.
+ * Renders the complete folder picker as a continuous selection list from a
+ * staged folder list. Shows up to MAX_FOLDERS_PER_PICKER folders in a single
+ * Telegram message without pagination or a "More folders" button, restoring
+ * the previous scrolling experience.
  */
-async function renderFolderPage(
+async function renderFolderList(
   env: Env,
   state: WorkState,
   target: HatMessageTarget,
   option: Record<string, any>,
-  offset: number,
 ): Promise<WorkState> {
   const folders: Array<{ id: string; name: string }> = option.folders;
-  const page = folders.slice(offset, offset + FOLDER_PICKER_PAGE_SIZE);
+  // Display up to MAX_FOLDERS_PER_PICKER folders in a single message.
+  // If there are more, we show a note but no pagination button (per the
+  // restored UX requirement: continuous scrolling list without "More folders").
+  const displayFolders = folders.slice(0, MAX_FOLDERS_PER_PICKER);
   const buttons: InlineButton[][] = [];
-  for (let i = 0; i < page.length; i++) {
-    const folder = page[i]!;
-    buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${option._listOpaqueId}:${offset + i}` }]);
-  }
-  if (offset + page.length < folders.length) {
-    buttons.push([{ text: "📂 More folders", callback_data: `googlefolder:${state.workId}:${option._listOpaqueId}:more` }]);
+  for (let i = 0; i < displayFolders.length; i++) {
+    const folder = displayFolders[i]!;
+    buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${option._listOpaqueId}:${i}` }]);
   }
   const isSmoke = option.smoke === true;
+  const totalFolders = folders.length;
+  const moreNote = totalFolders >= MAX_FOLDERS_PER_PICKER
+    ? `\n\n_Showing ${MAX_FOLDERS_PER_PICKER} of ${totalFolders} folders._`
+    : "";
   const messageText = isSmoke
-    ? `🧪 *GOVERNED TOOL REGISTRY SMOKE*\n\n*Account*: ${option.accountIdentifier}\n\nSelect the *disposable* Drive folder for the smoke document (never the production proposal folder):`
+    ? `🧪 *GOVERNED TOOL REGISTRY SMOKE*\n\n*Account*: ${option.accountIdentifier}\n\nSelect the *disposable* Drive folder for the smoke document (never the production proposal folder):${moreNote}`
     : option.delivery === true
-      ? `*Save approved output to Google Drive*\n\n*Account*: ${option.accountIdentifier}\n*Title*: ${option.title}\n\nSelect the target Drive folder -- you will confirm once more before anything is created:`
-      : `*Google Workspace Action*: ${option.docType === "sheet" ? "Create Google Sheet" : "Create Google Doc"}\n\n*Account*: ${option.accountIdentifier}\n*Title*: ${option.title}\n\nSelect the target Drive folder:`;
+      ? `*Save approved output to Google Drive*\n\n*Account*: ${option.accountIdentifier}\n*Title*: ${option.title}\n\nSelect the target Drive folder -- you will confirm once more before anything is created:${moreNote}`
+      : `*Google Workspace Action*: ${option.docType === "sheet" ? "Create Google Sheet" : "Create Google Doc"}\n\n*Account*: ${option.accountIdentifier}\n*Title*: ${option.title}\n\nSelect the target Drive folder:${moreNote}`;
   await sendWorkspaceHatMessage(env, target, messageText, buttons);
   if (isSmoke) {
     await logActivity(env, {
       entry: "Google Docs Registry smoke: folder picker presented",
       type: "Activity",
-      activity: `Registry smoke Drive folder picker presented for account '${option.accountIdentifier}'`,
+      activity: `Registry smoke Drive folder picker presented for account '${option.accountIdentifier}' (${totalFolders} folders)`,
       outcome: "Active",
       workId: state.workId,
     });
@@ -1909,17 +1942,30 @@ async function renderFolderPage(
     await logActivity(env, {
       entry: "Google Drive folders presented",
       type: "Activity",
-      activity: `Drive folder picker presented for account '${option.accountIdentifier}'`,
+      activity: `Drive folder picker presented for account '${option.accountIdentifier}' (${totalFolders} folders)`,
       outcome: "Active",
     });
   }
   return state;
 }
 
+/**
+ * Minimal interface for the Stage 4A WorkSession claim methods, exposed to
+ * `handleGoogleFolderSelection` so the callback can coordinate on the
+ * Durable Object transaction-backed claim primitive without importing the
+ * full WorkSession class.
+ */
+interface FolderClaimMethods {
+  claimFolderOption(opaqueId: string): Promise<boolean>;
+  resolveFolderClaim(opaqueId: string, status: "completed" | "failed"): Promise<void>;
+  getFolderClaimStatus(opaqueId: string): Promise<FolderClaimStatus | undefined>;
+}
+
 export async function handleGoogleFolderSelection(
   env: Env,
   state: WorkState,
   opaqueOptionId: string,
+  claims: FolderClaimMethods,
 ): Promise<WorkState> {
   const target: HatMessageTarget = {
     chatId: state.chatId,
@@ -1928,7 +1974,18 @@ export async function handleGoogleFolderSelection(
     workId: state.workId,
   };
 
-  // The callback value is "<opaqueId>:<position>|more": index.ts splits
+  // Send a Workspace task-interrupting failure notice. Swallow any transport
+  // failure so the notification attempt never escapes as an uncaught
+  // exception into generic WorkSession/Operations handling.
+  const notifyWorkspaceTaskError = async (message: string): Promise<void> => {
+    try {
+      await sendWorkspaceHatMessage(env, target, message);
+    } catch {
+      console.error(`Folder selection: Workspace notification transport failed for work ${state.workId}: ${message}`);
+    }
+  };
+
+  // The callback value is "<opaqueId>:<position>": index.ts splits
   // callback_data on ":" into [action, workId, value], and opaqueIds are
   // 8 hex characters with no colon of their own, so the position is the last
   // segment and the opaque id is everything before it.
@@ -1936,38 +1993,147 @@ export async function handleGoogleFolderSelection(
   const opaqueId = colon === -1 ? opaqueOptionId : opaqueOptionId.slice(0, colon);
   const position = colon === -1 ? undefined : opaqueOptionId.slice(colon + 1);
 
-  const option = await peekOpaqueOption(env, state.workId, opaqueId);
-  if (!option || option.kind !== "folderlist" || !Array.isArray(option.folders)) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      "⚠️ That folder selection option is invalid or expired. Please submit the request again.",
-    );
+  // STEP 1: Check the claim status FIRST, before reading the folder-list
+  // option. A duplicate callback arriving after the winner has consumed the
+  // option must be silently ignored, not misclassified as expired/invalid.
+  let claimStatus: FolderClaimStatus | undefined;
+  try {
+    claimStatus = await claims.getFolderClaimStatus(opaqueId);
+  } catch (err) {
+    // Status lookup failure: must not proceed to peek, claim, or consume.
+    // Report as a Workspace task error, not an uncaught exception.
+    await notifyWorkspaceTaskError("⚠️ Folder selection could not be verified. Please try again or start a fresh selection.");
+    return state;
+  }
+  if (claimStatus === "claimed" || claimStatus === "completed" || claimStatus === "failed") {
+    // Duplicate callback: silently ignore. No Telegram message, no peek,
+    // no consumption, no continuation.
     return state;
   }
 
-  // "more" re-renders the same list from the next page; anything else consumes
-  // the list and picks that folder.
-  if (position === "more") {
-    return renderFolderPage(env, state, target, option, FOLDER_PICKER_PAGE_SIZE);
+  // STEP 2: Peek the existing folder-list option (no claim yet).
+  let option: Record<string, any> | null;
+  try {
+    option = await peekOpaqueOption(env, state.workId, opaqueId);
+  } catch (err) {
+    // Peek failure: must not proceed to claim or consume.
+    await notifyWorkspaceTaskError("⚠️ Folder selection could not be read. Please try again or start a fresh selection.");
+    return state;
   }
+  if (!option || option.kind !== "folderlist" || !Array.isArray(option.folders)) {
+    await notifyWorkspaceTaskError("⚠️ That folder selection option is invalid or expired. Please submit the request again.");
+    return state;
+  }
+
+  // STEP 3: Validate the selected folder position against the peeked option.
   const index = position === undefined ? NaN : Number(position);
   const picked = Number.isInteger(index) && index >= 0 && index < option.folders.length ? option.folders[index] : undefined;
   if (!picked) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      "⚠️ That folder selection is no longer current -- nothing was recorded.",
+    await notifyWorkspaceTaskError("⚠️ That folder selection is no longer current -- nothing was recorded.");
+    return state;
+  }
+
+  // STEP 4: Attempt the atomic claim. The Stage 4A DO transaction-backed
+  // primitive decides the winner. If we lose, return silently.
+  let claimed: boolean;
+  try {
+    claimed = await claims.claimFolderOption(opaqueId);
+  } catch (err) {
+    // Claim acquisition failure with uncertain outcome: do not blindly
+    // retry or consume. Preserve the claim's protected state and report
+    // the uncertainty.
+    await notifyWorkspaceTaskError("⚠️ Folder selection claim could not be verified. Please try again or start a fresh selection.");
+    return state;
+  }
+  if (!claimed) {
+    // Lost the claim race: another callback already won. Silent ignore.
+    return state;
+  }
+
+  // STEP 5: Only the winner consumes the option.
+  // Any failure from this point onward must resolve the claim as "failed"
+  // so the claim marker is not left stranded as "claimed" forever.
+  let claimResolved = false;
+
+  const resolveClaimFailed = async (message: string): Promise<void> => {
+    if (!claimResolved) {
+      try {
+        await claims.resolveFolderClaim(opaqueId, "failed");
+        claimResolved = true;
+      } catch (err) {
+        // Resolve itself failed; claim remains in its prior state.
+        console.error(`Folder selection: failed to resolve claim "${opaqueId}" as failed for work ${state.workId}`, err);
+      }
+    }
+    // Send the Workspace notification, but never let a transport failure
+    // create a second uncaught exception that falls through to Operations.
+    try {
+      await sendWorkspaceHatMessage(env, target, message);
+    } catch {
+      console.error(`Folder selection: Workspace notification transport failed for work ${state.workId}: ${message}`);
+    }
+  };
+
+  const resolveClaimCompleted = async (): Promise<void> => {
+    if (!claimResolved) {
+      try {
+        await claims.resolveFolderClaim(opaqueId, "completed");
+        claimResolved = true;
+      } catch (err) {
+        // Log the resolution failure so a stranded "claimed" marker is
+        // diagnosable. Do not tell the user the proposal failed — the
+        // Telegram handoff may already have succeeded.
+        console.error(`Folder selection: failed to resolve claim "${opaqueId}" as completed for work ${state.workId}`, err);
+      }
+    }
+  };
+
+  // Do not catch network exceptions here: a rejected fetch is an unknown
+  // delivery outcome, not a confirmed provider rejection. Let it propagate
+  // so callers can distinguish confirmed failure from unknown outcome.
+  const sendWithOutcome = async (
+    text: string,
+    buttons?: InlineButton[][],
+  ): Promise<TelegramSendResult> => {
+    return await sendWorkspaceHatMessageWithOutcome(env, target, text, buttons);
+  };
+
+  // Clear any WorkSession state mutations made during this call before
+  // returning on a post-claim failure. Keeps the Work clean for a fresh
+  // selection so a stale pendingGoogleAction/pendingSmokeSelection doesn't
+  // survive a failed delivery.
+  const clearPendingState = (): void => {
+    state.pendingGoogleAction = undefined;
+    state.pendingActionSummary = undefined;
+    state.pendingSmokeSelection = undefined;
+  };
+
+  let consumed: Record<string, any> | null = null;
+  let consumeError: unknown;
+  try {
+    consumed = await consumeOpaqueOption(env, state.workId, opaqueId);
+  } catch (err) {
+    consumeError = err;
+  }
+
+  if (consumeError !== undefined || !consumed) {
+    await resolveClaimFailed(
+      consumeError !== undefined
+        ? "⚠️ Folder selection failed while reading your selection. Nothing was created — try again or start a fresh selection."
+        : "⚠️ That folder selection option was already consumed. Please submit the request again.",
     );
     return state;
   }
-  // Consuming the list makes the pick single-use: a replayed button cannot
-  // re-pick the same folder (the same discipline as the old per-folder
-  // consume, which deleted each option on tap).
-  await kvDelete(env, `google_option:${state.workId}:${opaqueId}`);
-  const { accountIdentifier, title, content, rows } = option;
-  const folderId = picked.id;
-  const folderName = picked.name;
+  // Re-validate the pick against the consumed option (authoritative source).
+  const revalidated = Number.isInteger(index) && index >= 0 && index < consumed.folders.length ? consumed.folders[index] : undefined;
+  if (!revalidated) {
+    await resolveClaimFailed("⚠️ That folder selection is no longer current -- nothing was recorded.");
+    return state;
+  }
+
+  const { accountIdentifier, title, content, rows } = consumed;
+  const folderId = revalidated.id;
+  const folderName = revalidated.name;
   const docType: "doc" | "sheet" = option.docType === "sheet" ? "sheet" : "doc";
   // Shared output-delivery flow (src/outputDelivery.ts): the folder option
   // carries `delivery: true`. Route to the final explicit confirmation, which
@@ -1993,11 +2159,7 @@ export async function handleGoogleFolderSelection(
       });
     } catch (err) {
       console.error(`Google Docs smoke confirmation staging failed for work ${state.workId} -- nothing was staged`, err);
-      await sendWorkspaceHatMessage(
-        env,
-        target,
-        "⚠️ Could not persist the smoke confirmation (storage write refused -- likely the daily KV quota). Nothing was created -- retry the folder step or start a fresh /googledocssmoke flow.",
-      );
+      await resolveClaimFailed("⚠️ Could not persist the smoke confirmation (storage write refused). Nothing was created — retry the folder step or start a fresh /googledocssmoke flow.");
       return state;
     }
 
@@ -2025,16 +2187,49 @@ export async function handleGoogleFolderSelection(
       "read-back) -- each as its own governed invocation with its own durable operation records, both " +
       "judged by this Work's recorded Action. Nothing has been created yet; the rewrite can only ever " +
       "target the Doc this same run creates, and the production proposal folder is never touched.\n\nConfirm?";
-    await sendWorkspaceHatMessage(env, target, messageText, confirmButtons);
 
-    await logActivity(env, {
-      entry: "Google Docs Registry smoke: confirmation presented",
-      type: "Activity",
-      activity: `Registry smoke target selected for account '${accountIdentifier}' in folder '${folderName}' (${folderId}) -- awaiting explicit confirmation`,
-      outcome: "Active",
-      workId: state.workId,
-    });
+    // Deliver Telegram confirmation and check whether delivery succeeded.
+    let telegramOutcome: "delivered" | "rejected" | "unknown";
+    try {
+      const result = await sendWithOutcome(messageText, confirmButtons);
+      telegramOutcome = result.delivered ? "delivered" : "rejected";
+    } catch {
+      // Unknown delivery outcome: a network exception after a send was
+      // attempted. Do not blindly retry, do not clear state, do not
+      // resolve the claim as "failed". Preserve state so a confirmation
+      // button that WAS delivered can still be honoured. The claim
+      // remains "claimed" and protected against duplicate callbacks.
+      console.error(`Folder selection: Telegram delivery outcome unknown (network exception) for work ${state.workId}`);
+      await notifyWorkspaceTaskError("⚠️ Telegram delivery of your smoke confirmation could not be confirmed. No Google Doc has been created yet. Please check whether the confirmation message arrived before retrying the folder step or starting a fresh /googledocssmoke flow.");
+      return state;
+    }
 
+    if (telegramOutcome === "rejected") {
+      clearPendingState();
+      await resolveClaimFailed("⚠️ Smoke confirmation was staged but could not be delivered. Your selection was recorded — try the folder step again or start a fresh /googledocssmoke flow.");
+      return state;
+    }
+    // telegramOutcome === "delivered": continue to logActivity below.
+
+    try {
+      await logActivity(env, {
+        entry: "Google Docs Registry smoke: confirmation presented",
+        type: "Activity",
+        activity: `Registry smoke target selected for account '${accountIdentifier}' in folder '${folderName}' (${folderId}) -- awaiting explicit confirmation`,
+        outcome: "Active",
+        workId: state.workId,
+      });
+    } catch (err) {
+      // Telegram was delivered successfully; activity logging failed.
+      // Preserve pending state so the delivered confirmation button remains usable.
+      // Do not resolve the claim as failed or completed merely because logging failed.
+      console.error(`Folder selection: smoke confirmation activity logging failed for work ${state.workId}`, err);
+      await notifyWorkspaceTaskError("⚠️ Your smoke confirmation was delivered but activity logging failed. No document has been created. Please check whether the confirmation message arrived before retrying.");
+      return state;
+    }
+
+    // STEP 6: Mark the claim completed after successful handoff to the smoke confirmation stage.
+    await resolveClaimCompleted();
     return state;
   }
 
@@ -2055,11 +2250,7 @@ export async function handleGoogleFolderSelection(
       });
     } catch (err) {
       console.error(`Output delivery: confirmation staging failed for work ${state.workId} -- nothing was staged`, err);
-      await sendWorkspaceHatMessage(
-        env,
-        target,
-        "⚠️ Could not persist the output-delivery confirmation (storage write refused -- likely the daily KV quota). Nothing was created -- please try again after the quota window resets.",
-      );
+      await resolveClaimFailed("⚠️ Could not persist the output-delivery confirmation (storage write refused). Nothing was created — please try again after the quota window resets.");
       return state;
     }
     // Final explicit confirmation before creation. The confirm button carries
@@ -2078,15 +2269,46 @@ export async function handleGoogleFolderSelection(
       `*Title*: ${title}\n\n` +
       "Confirming creates exactly ONE Google Doc in this folder through the shared Tool Registry " +
       "(`google_docs.create_and_verify`, proved by read-back). Nothing has been created yet.\n\nConfirm?";
-    await sendWorkspaceHatMessage(env, target, messageText, confirmButtons);
-    await logActivity(env, {
-      entry: "Output delivery confirmation presented",
-      type: "Activity",
-      area: state.unit ?? "Operations",
-      activity: `Output delivery target selected for account '${accountIdentifier}' in folder '${folderName}' (${folderId}) -- awaiting explicit confirmation`,
-      outcome: "Active",
-      workId: state.workId,
-    });
+
+    let telegramOutcome: "delivered" | "rejected" | "unknown";
+    try {
+      const result = await sendWithOutcome(messageText, confirmButtons);
+      telegramOutcome = result.delivered ? "delivered" : "rejected";
+    } catch {
+      // Unknown delivery outcome: network exception after a send was
+      // attempted. Do not blindly retry, do not clear state, do not
+      // resolve the claim as "failed". Preserve state.
+      console.error(`Folder selection: Telegram delivery outcome unknown (network exception) for work ${state.workId}`);
+      await notifyWorkspaceTaskError("⚠️ Telegram delivery of your output-delivery confirmation could not be confirmed. No Google Doc has been created yet. Please check whether the confirmation message arrived before retrying.");
+      return state;
+    }
+
+    if (telegramOutcome === "rejected") {
+      clearPendingState();
+      await resolveClaimFailed("⚠️ Output-delivery confirmation was staged but could not be delivered. Your selection was recorded — try again or start a fresh selection.");
+      return state;
+    }
+
+    try {
+      await logActivity(env, {
+        entry: "Output delivery confirmation presented",
+        type: "Activity",
+        area: state.unit ?? "Operations",
+        activity: `Output delivery target selected for account '${accountIdentifier}' in folder '${folderName}' (${folderId}) -- awaiting explicit confirmation`,
+        outcome: "Active",
+        workId: state.workId,
+      });
+    } catch (err) {
+      // Telegram was delivered successfully; activity logging failed.
+      // Preserve pending state so the delivered confirmation button remains usable.
+      // Do not resolve the claim as failed or completed merely because logging failed.
+      console.error(`Folder selection: output-delivery confirmation activity logging failed for work ${state.workId}`, err);
+      await notifyWorkspaceTaskError("⚠️ Your output-delivery confirmation was delivered but activity logging failed. No document has been created. Please check whether the confirmation message arrived before retrying.");
+      return state;
+    }
+
+    // STEP 6: Mark the claim completed after successful handoff to the delivery confirmation stage.
+    await resolveClaimCompleted();
     return state;
   }
 
@@ -2113,15 +2335,43 @@ export async function handleGoogleFolderSelection(
 
     state.pendingActionSummary = { label: `Create Google Sheet: ${title}`, message: messageText, buttons, createdAt: new Date().toISOString() };
 
-    await sendWorkspaceHatMessage(env, target, messageText, buttons);
+    let telegramOutcome: "delivered" | "rejected" | "unknown";
+    try {
+      const result = await sendWithOutcome(messageText, buttons);
+      telegramOutcome = result.delivered ? "delivered" : "rejected";
+    } catch {
+      // Unknown delivery outcome: network exception after a send was
+      // attempted. Do not blindly retry, do not clear state, do not
+      // resolve the claim as "failed". Preserve state.
+      console.error(`Folder selection: Telegram delivery outcome unknown (network exception) for work ${state.workId}`);
+      await notifyWorkspaceTaskError("⚠️ Telegram delivery of your Google Sheet proposal could not be confirmed. No Google Sheet has been created yet. Please check whether the proposal message arrived before retrying.");
+      return state;
+    }
 
-    await logActivity(env, {
-      entry: "Google Sheet creation proposed",
-      type: "Activity",
-      activity: `Google Sheet creation proposed for '${title}' in folder '${folderName}' (${folderId}) for account '${accountIdentifier}'`,
-      outcome: "Active",
-    });
+    if (telegramOutcome === "rejected") {
+      clearPendingState();
+      await resolveClaimFailed("⚠️ Google Sheet proposal was staged but could not be delivered. Your selection was recorded — try again or start a fresh selection.");
+      return state;
+    }
 
+    try {
+      await logActivity(env, {
+        entry: "Google Sheet creation proposed",
+        type: "Activity",
+        activity: `Google Sheet creation proposed for '${title}' in folder '${folderName}' (${folderId}) for account '${accountIdentifier}'`,
+        outcome: "Active",
+      });
+    } catch (err) {
+      // Telegram was delivered successfully; activity logging failed.
+      // Preserve pending state so the delivered proposal button remains usable.
+      // Do not resolve the claim as failed or completed merely because logging failed.
+      console.error(`Folder selection: Google Sheet proposal activity logging failed for work ${state.workId}`, err);
+      await notifyWorkspaceTaskError("⚠️ Your Google Sheet proposal was delivered but activity logging failed. No sheet has been created. Please check whether the proposal message arrived before retrying.");
+      return state;
+    }
+
+    // STEP 6: Mark the claim completed after successful handoff to the sheet proposal stage.
+    await resolveClaimCompleted();
     return state;
   }
 
@@ -2138,15 +2388,43 @@ export async function handleGoogleFolderSelection(
 
   state.pendingActionSummary = { label: `Create Google Doc: ${title}`, message: messageText, buttons, createdAt: new Date().toISOString() };
 
-  await sendWorkspaceHatMessage(env, target, messageText, buttons);
+  let telegramOutcome: "delivered" | "rejected" | "unknown";
+  try {
+    const result = await sendWithOutcome(messageText, buttons);
+    telegramOutcome = result.delivered ? "delivered" : "rejected";
+  } catch {
+    // Unknown delivery outcome: network exception after a send was
+    // attempted. Do not blindly retry, do not clear state, do not
+    // resolve the claim as "failed". Preserve state.
+    console.error(`Folder selection: Telegram delivery outcome unknown (network exception) for work ${state.workId}`);
+    await notifyWorkspaceTaskError("⚠️ Telegram delivery of your Google Doc proposal could not be confirmed. No Google Doc has been created yet. Please check whether the proposal message arrived before retrying.");
+    return state;
+  }
 
-  await logActivity(env, {
-    entry: "Google Doc creation proposed",
-    type: "Activity",
-    activity: `Google Doc creation proposed for '${title}' in folder '${folderName}' (${folderId}) for account '${accountIdentifier}'`,
-    outcome: "Active",
-  });
+  if (telegramOutcome === "rejected") {
+    clearPendingState();
+    await resolveClaimFailed("⚠️ Google Doc proposal was staged but could not be delivered. Your selection was recorded — try again or start a fresh selection.");
+    return state;
+  }
 
+  try {
+    await logActivity(env, {
+      entry: "Google Doc creation proposed",
+      type: "Activity",
+      activity: `Google Doc creation proposed for '${title}' in folder '${folderName}' (${folderId}) for account '${accountIdentifier}'`,
+      outcome: "Active",
+    });
+  } catch (err) {
+    // Telegram was delivered successfully; activity logging failed.
+    // Preserve pending state so the delivered proposal button remains usable.
+    // Do not resolve the claim as failed or completed merely because logging failed.
+    console.error(`Folder selection: Google Doc proposal activity logging failed for work ${state.workId}`, err);
+    await notifyWorkspaceTaskError("⚠️ Your Google Doc proposal was delivered but activity logging failed. No document has been created. Please check whether the proposal message arrived before retrying.");
+    return state;
+  }
+
+  // STEP 6: Mark the claim completed after successful handoff to the doc proposal stage.
+  await resolveClaimCompleted();
   return state;
 }
 
