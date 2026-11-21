@@ -1974,6 +1974,17 @@ export async function handleGoogleFolderSelection(
     workId: state.workId,
   };
 
+  // Send a Workspace task-interrupting failure notice. Swallow any transport
+  // failure so the notification attempt never escapes as an uncaught
+  // exception into generic WorkSession/Operations handling.
+  const notifyWorkspaceTaskError = async (message: string): Promise<void> => {
+    try {
+      await sendWorkspaceHatMessage(env, target, message);
+    } catch {
+      console.error(`Folder selection: Workspace notification transport failed for work ${state.workId}: ${message}`);
+    }
+  };
+
   // The callback value is "<opaqueId>:<position>": index.ts splits
   // callback_data on ":" into [action, workId, value], and opaqueIds are
   // 8 hex characters with no colon of their own, so the position is the last
@@ -1985,7 +1996,15 @@ export async function handleGoogleFolderSelection(
   // STEP 1: Check the claim status FIRST, before reading the folder-list
   // option. A duplicate callback arriving after the winner has consumed the
   // option must be silently ignored, not misclassified as expired/invalid.
-  const claimStatus = await claims.getFolderClaimStatus(opaqueId);
+  let claimStatus: FolderClaimStatus | undefined;
+  try {
+    claimStatus = await claims.getFolderClaimStatus(opaqueId);
+  } catch (err) {
+    // Status lookup failure: must not proceed to peek, claim, or consume.
+    // Report as a Workspace task error, not an uncaught exception.
+    await notifyWorkspaceTaskError("⚠️ Folder selection could not be verified. Please try again or start a fresh selection.");
+    return state;
+  }
   if (claimStatus === "claimed" || claimStatus === "completed" || claimStatus === "failed") {
     // Duplicate callback: silently ignore. No Telegram message, no peek,
     // no consumption, no continuation.
@@ -1993,7 +2012,14 @@ export async function handleGoogleFolderSelection(
   }
 
   // STEP 2: Peek the existing folder-list option (no claim yet).
-  const option = await peekOpaqueOption(env, state.workId, opaqueId);
+  let option: Record<string, any> | null;
+  try {
+    option = await peekOpaqueOption(env, state.workId, opaqueId);
+  } catch (err) {
+    // Peek failure: must not proceed to claim or consume.
+    await notifyWorkspaceTaskError("⚠️ Folder selection could not be read. Please try again or start a fresh selection.");
+    return state;
+  }
   if (!option || option.kind !== "folderlist" || !Array.isArray(option.folders)) {
     await sendWorkspaceHatMessage(
       env,
@@ -2017,7 +2043,16 @@ export async function handleGoogleFolderSelection(
 
   // STEP 4: Attempt the atomic claim. The Stage 4A DO transaction-backed
   // primitive decides the winner. If we lose, return silently.
-  const claimed = await claims.claimFolderOption(opaqueId);
+  let claimed: boolean;
+  try {
+    claimed = await claims.claimFolderOption(opaqueId);
+  } catch (err) {
+    // Claim acquisition failure with uncertain outcome: do not blindly
+    // retry or consume. Preserve the claim's protected state and report
+    // the uncertainty.
+    await notifyWorkspaceTaskError("⚠️ Folder selection claim could not be verified. Please try again or start a fresh selection.");
+    return state;
+  }
   if (!claimed) {
     // Lost the claim race: another callback already won. Silent ignore.
     return state;
@@ -2033,11 +2068,18 @@ export async function handleGoogleFolderSelection(
       try {
         await claims.resolveFolderClaim(opaqueId, "failed");
         claimResolved = true;
-      } catch {
+      } catch (err) {
         // Resolve itself failed; claim remains in its prior state.
+        console.error(`Folder selection: failed to resolve claim "${opaqueId}" as failed for work ${state.workId}`, err);
       }
     }
-    await sendWorkspaceHatMessage(env, target, message);
+    // Send the Workspace notification, but never let a transport failure
+    // create a second uncaught exception that falls through to Operations.
+    try {
+      await sendWorkspaceHatMessage(env, target, message);
+    } catch {
+      console.error(`Folder selection: Workspace notification transport failed for work ${state.workId}: ${message}`);
+    }
   };
 
   const resolveClaimCompleted = async (): Promise<void> => {
@@ -2045,27 +2087,23 @@ export async function handleGoogleFolderSelection(
       try {
         await claims.resolveFolderClaim(opaqueId, "completed");
         claimResolved = true;
-      } catch {
-        // Resolve itself failed; claim remains "claimed". The workflow
-        // may still have progressed (Telegram delivered), so we do not
-        // treat this as user-facing failure.
+      } catch (err) {
+        // Log the resolution failure so a stranded "claimed" marker is
+        // diagnosable. Do not tell the user the proposal failed — the
+        // Telegram handoff may already have succeeded.
+        console.error(`Folder selection: failed to resolve claim "${opaqueId}" as completed for work ${state.workId}`, err);
       }
     }
   };
 
-  // sendWorkspaceHatMessageWithOutcome can throw when the Telegram fetch
-  // itself fails (network error). Wrap it so a throw is treated as
-  // delivered: false — the caller can then resolve the claim as failed
-  // instead of crashing the whole callback.
+  // Do not catch network exceptions here: a rejected fetch is an unknown
+  // delivery outcome, not a confirmed provider rejection. Let it propagate
+  // so callers can distinguish confirmed failure from unknown outcome.
   const sendWithOutcome = async (
     text: string,
     buttons?: InlineButton[][],
   ): Promise<TelegramSendResult> => {
-    try {
-      return await sendWorkspaceHatMessageWithOutcome(env, target, text, buttons);
-    } catch {
-      return { delivered: false, attempts: [], unconfiguredStream: false };
-    }
+    return await sendWorkspaceHatMessageWithOutcome(env, target, text, buttons);
   };
 
   // Clear any WorkSession state mutations made during this call before
@@ -2159,12 +2197,26 @@ export async function handleGoogleFolderSelection(
       "target the Doc this same run creates, and the production proposal folder is never touched.\n\nConfirm?";
 
     // Deliver Telegram confirmation and check whether delivery succeeded.
-    const telegramResult = await sendWithOutcome(messageText, confirmButtons);
-    if (!telegramResult.delivered) {
+    let telegramOutcome: "delivered" | "rejected" | "unknown";
+    try {
+      const result = await sendWithOutcome(messageText, confirmButtons);
+      telegramOutcome = result.delivered ? "delivered" : "rejected";
+    } catch {
+      // Unknown delivery outcome: a network exception after a send was
+      // attempted. Do not blindly retry, do not clear state, do not
+      // resolve the claim as "failed". Preserve state so a confirmation
+      // button that WAS delivered can still be honoured. The claim
+      // remains "claimed" and protected against duplicate callbacks.
+      console.error(`Folder selection: Telegram delivery outcome unknown (network exception) for work ${state.workId}`);
+      return state;
+    }
+
+    if (telegramOutcome === "rejected") {
       clearPendingState();
       await resolveClaimFailed("⚠️ Smoke confirmation was staged but could not be delivered. Your selection was recorded — try the folder step again or start a fresh /googledocssmoke flow.");
       return state;
     }
+    // telegramOutcome === "delivered": continue to logActivity below.
 
     try {
       await logActivity(env, {
@@ -2224,8 +2276,19 @@ export async function handleGoogleFolderSelection(
       "Confirming creates exactly ONE Google Doc in this folder through the shared Tool Registry " +
       "(`google_docs.create_and_verify`, proved by read-back). Nothing has been created yet.\n\nConfirm?";
 
-    const telegramResult = await sendWithOutcome(messageText, confirmButtons);
-    if (!telegramResult.delivered) {
+    let telegramOutcome: "delivered" | "rejected" | "unknown";
+    try {
+      const result = await sendWithOutcome(messageText, confirmButtons);
+      telegramOutcome = result.delivered ? "delivered" : "rejected";
+    } catch {
+      // Unknown delivery outcome: network exception after a send was
+      // attempted. Do not blindly retry, do not clear state, do not
+      // resolve the claim as "failed". Preserve state.
+      console.error(`Folder selection: Telegram delivery outcome unknown (network exception) for work ${state.workId}`);
+      return state;
+    }
+
+    if (telegramOutcome === "rejected") {
       clearPendingState();
       await resolveClaimFailed("⚠️ Output-delivery confirmation was staged but could not be delivered. Your selection was recorded — try again or start a fresh selection.");
       return state;
@@ -2273,8 +2336,19 @@ export async function handleGoogleFolderSelection(
 
     state.pendingActionSummary = { label: `Create Google Sheet: ${title}`, message: messageText, buttons, createdAt: new Date().toISOString() };
 
-    const telegramResult = await sendWithOutcome(messageText, buttons);
-    if (!telegramResult.delivered) {
+    let telegramOutcome: "delivered" | "rejected" | "unknown";
+    try {
+      const result = await sendWithOutcome(messageText, buttons);
+      telegramOutcome = result.delivered ? "delivered" : "rejected";
+    } catch {
+      // Unknown delivery outcome: network exception after a send was
+      // attempted. Do not blindly retry, do not clear state, do not
+      // resolve the claim as "failed". Preserve state.
+      console.error(`Folder selection: Telegram delivery outcome unknown (network exception) for work ${state.workId}`);
+      return state;
+    }
+
+    if (telegramOutcome === "rejected") {
       clearPendingState();
       await resolveClaimFailed("⚠️ Google Sheet proposal was staged but could not be delivered. Your selection was recorded — try again or start a fresh selection.");
       return state;
@@ -2311,8 +2385,19 @@ export async function handleGoogleFolderSelection(
 
   state.pendingActionSummary = { label: `Create Google Doc: ${title}`, message: messageText, buttons, createdAt: new Date().toISOString() };
 
-  const telegramResult = await sendWithOutcome(messageText, buttons);
-  if (!telegramResult.delivered) {
+  let telegramOutcome: "delivered" | "rejected" | "unknown";
+  try {
+    const result = await sendWithOutcome(messageText, buttons);
+    telegramOutcome = result.delivered ? "delivered" : "rejected";
+  } catch {
+    // Unknown delivery outcome: network exception after a send was
+    // attempted. Do not blindly retry, do not clear state, do not
+    // resolve the claim as "failed". Preserve state.
+    console.error(`Folder selection: Telegram delivery outcome unknown (network exception) for work ${state.workId}`);
+    return state;
+  }
+
+  if (telegramOutcome === "rejected") {
     clearPendingState();
     await resolveClaimFailed("⚠️ Google Doc proposal was staged but could not be delivered. Your selection was recorded — try again or start a fresh selection.");
     return state;

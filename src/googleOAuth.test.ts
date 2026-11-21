@@ -2906,8 +2906,9 @@ test("Stage 4C: Telegram delivery failure after confirmation staged — claim re
 
   let sentTelegramText = "";
 
-  // Make the FIRST telegram call fail (network throw → treated as delivered: false).
-  // The second call (from resolveClaimFailed) succeeds and its body is captured.
+  // Make the FIRST telegram chunk fail on BOTH Markdown and plain-text
+  // attempts (confirmed rejection). The notification call from
+  // resolveClaimFailed succeeds.
   let telegramCallCount = 0;
   globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
     const u = String(_url);
@@ -2915,8 +2916,11 @@ test("Stage 4C: Telegram delivery failure after confirmation staged — claim re
       telegramCallCount++;
       const body = _init?.body ? JSON.parse(String(_init.body)) : {};
       sentTelegramText = body.text || "";
-      if (telegramCallCount === 1) {
-        throw new Error("Telegram network error");
+      if (telegramCallCount <= 2) {
+        return new Response(JSON.stringify({ ok: false, description: "Internal Server Error" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }
@@ -3208,8 +3212,9 @@ test("Stage 4C: recoverable failure followed by fresh selection succeeds", async
 
   let sentTelegramText = "";
 
-  // First attempt: Telegram fails on the first call. The second call
-  // (from resolveClaimFailed) succeeds. Second attempt: all calls succeed.
+  // First attempt: Telegram returns a confirmed rejection (HTTP 500) on BOTH
+  // Markdown and plain-text attempts. The notification call from
+  // resolveClaimFailed succeeds. Second attempt: all calls succeed.
   let telegramCallCount = 0;
   let firstAttemptDone = false;
   globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
@@ -3218,8 +3223,11 @@ test("Stage 4C: recoverable failure followed by fresh selection succeeds", async
       telegramCallCount++;
       const body = _init?.body ? JSON.parse(String(_init.body)) : {};
       sentTelegramText = body.text || "";
-      if (!firstAttemptDone && telegramCallCount === 1) {
-        throw new Error("First Telegram attempt failed");
+      if (!firstAttemptDone && telegramCallCount <= 2) {
+        return new Response(JSON.stringify({ ok: false, description: "Internal Server Error" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }
@@ -3334,6 +3342,492 @@ test("Stage 4C: uncertain remote operation does not trigger blind retry", async 
     assert.strictEqual(resolveFailedCalled, true, "claim resolved as failed after uncertain delivery");
     assert.match(sentTelegramText, /could not be delivered/, "Workspace notification about uncertain delivery");
     assert.strictEqual(updatedState.pendingGoogleAction, undefined, "no pending action when delivery uncertain");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: Telegram network exception — unknown delivery outcome, state preserved", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-telegram-unknown";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "telegram-unknown@enig.com",
+    title: "Telegram Unknown Test",
+    content: "Testing unknown delivery outcome",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  // First telegram call throws (network exception → unknown outcome).
+  // Second call (from any notification) succeeds.
+  let telegramCallCount = 0;
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      telegramCallCount++;
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      sentTelegramText = body.text || "";
+      if (telegramCallCount === 1) {
+        throw new Error("Telegram network exception");
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let resolveFailedCalled = false;
+    let resolveCompletedCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => true,
+      resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+        if (status === "failed") resolveFailedCalled = true;
+        if (status === "completed") resolveCompletedCalled = true;
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    // Unknown outcome: claim NOT resolved as failed, state preserved,
+    // no user-facing failure message (delivery could not be confirmed as failed).
+    assert.strictEqual(resolveFailedCalled, false, "claim NOT resolved as failed on unknown outcome");
+    assert.strictEqual(resolveCompletedCalled, false, "claim NOT resolved as completed on unknown outcome");
+    assert.strictEqual(updatedState.pendingGoogleAction?.title, "Telegram Unknown Test", "state preserved — pendingGoogleAction not cleared");
+    assert.strictEqual(updatedState.pendingActionSummary !== undefined, true, "state preserved — pendingActionSummary not cleared");
+    // No failure notification was sent for the unknown outcome.
+    assert.match(sentTelegramText, /Proposed Action.*Create Google Doc/, "proposal message was delivered (or attempted), not a failure notice");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: status lookup throwing before any option read or claim", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-status-throw";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "status-throw@enig.com",
+    title: "Status Throw Test",
+    content: "Testing status lookup failure",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let claimCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => {
+        throw new Error("DO storage read failed");
+      },
+      claimFolderOption: async () => {
+        claimCalled = true;
+        return true;
+      },
+      resolveFolderClaim: async () => {},
+    };
+
+    // Track consume via KV: if peek threw, consume should never be reached.
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(claimCalled, false, "claimFolderOption NOT called after status lookup failure");
+    assert.match(sentTelegramText, /could not be verified/, "Workspace notification about status lookup failure");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "no pending action after status lookup failure");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: folder-option peek throwing before claim or consumption", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+  const originalGet = mockKv.get.bind(mockKv);
+
+  const workId = "work-4c-peek-throw";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "peek-throw@enig.com",
+    title: "Peek Throw Test",
+    content: "Testing peek failure",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  // Make kvGet throw on google_option keys (peek fails).
+  mockKv.get = async (key: string) => {
+    if (key.startsWith(`google_option:${workId}:`)) {
+      throw new Error("KV read failed on peek");
+    }
+    return originalGet(key);
+  };
+
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let claimCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => {
+        claimCalled = true;
+        return true;
+      },
+      resolveFolderClaim: async () => {},
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(claimCalled, false, "claimFolderOption NOT called after peek failure");
+    assert.match(sentTelegramText, /could not be read/, "Workspace notification about peek failure");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "no pending action after peek failure");
+  } finally {
+    mockKv.get = originalGet;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: claim acquisition throwing without consuming the option", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-claim-throw";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "claim-throw@enig.com",
+    title: "Claim Throw Test",
+    content: "Testing claim acquisition failure",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => {
+        throw new Error("DO transaction failed");
+      },
+      resolveFolderClaim: async () => {},
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.match(sentTelegramText, /could not be verified/, "Workspace notification about claim acquisition failure");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "no pending action after claim acquisition failure");
+
+    // Option must NOT be consumed (claim failed before consume).
+    const store = mockKv._rawStore;
+    let listExists = false;
+    for (const [key, value] of store.entries()) {
+      if (key.startsWith(`google_option:${workId}:`) && value.value.includes("folderlist")) {
+        listExists = true;
+        break;
+      }
+    }
+    assert.strictEqual(listExists, true, "option NOT consumed when claim acquisition threw");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: uncertain claim acquisition outcome without blind retry", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-claim-uncertain";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "claim-uncertain@enig.com",
+    title: "Claim Uncertain Test",
+    content: "Testing uncertain claim acquisition",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let claimCallCount = 0;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => {
+        claimCallCount++;
+        throw new Error("DO transaction uncertain outcome");
+      },
+      resolveFolderClaim: async () => {},
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(claimCallCount, 1, "claim attempted exactly once — no blind retry on uncertain outcome");
+    assert.match(sentTelegramText, /could not be verified/, "Workspace notification about uncertain claim outcome");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "no pending action after uncertain claim outcome");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: Workspace notification transport failure without uncaught exception", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-notify-throw";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "notify-throw@enig.com",
+    title: "Notify Throw Test",
+    content: "Testing notification transport failure",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  // All telegram fetch calls throw — including the notification attempt
+  // from notifyWorkspaceTaskError. The exception must be caught internally
+  // and never escape to generic WorkSession/Operations handling.
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    throw new Error("Telegram transport failure");
+  }) as typeof fetch;
+
+  try {
+    const claims = {
+      getFolderClaimStatus: async () => {
+        throw new Error("DO storage read failed");
+      },
+      claimFolderOption: async () => true,
+      resolveFolderClaim: async () => {},
+    };
+
+    // Should not throw — notification transport failure is caught internally.
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "no pending action when notification transport failed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: completed claim resolution failure — diagnostic logged, user not told proposal failed", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-resolve-complete-throw";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "resolve-complete-throw@enig.com",
+    title: "Resolve Complete Throw Test",
+    content: "Testing completed claim resolution failure",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  // Telegram delivery succeeds. resolveFolderClaim throws on "completed".
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let resolveCompletedCalled = false;
+    let resolveFailedCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => true,
+      resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+        if (status === "completed") {
+          resolveCompletedCalled = true;
+          throw new Error("DO storage write failed on completed");
+        }
+        if (status === "failed") resolveFailedCalled = true;
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(resolveCompletedCalled, true, "resolve as completed was attempted");
+    assert.strictEqual(resolveFailedCalled, false, "claim NOT resolved as failed");
+    // State preserved (proposal handoff succeeded).
+    assert.strictEqual(updatedState.pendingGoogleAction?.title, "Resolve Complete Throw Test", "state preserved after complete-resolution failure");
+    // User was NOT told the proposal failed — the Telegram handoff succeeded.
+    assert.match(sentTelegramText, /Proposed Action.*Create Google Doc/, "proposal message delivered to user, not a failure notice");
+    // Claim remains "claimed" (not resolved) — protected against duplicates.
+    assert.strictEqual(updatedState.pendingActionSummary !== undefined, true, "pendingActionSummary preserved");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4C: failed claim resolution failure — diagnostic logged, user notified anyway", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4c-resolve-fail-throw";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "resolve-fail-throw@enig.com",
+    title: "Resolve Fail Throw Test",
+    content: "Testing failed claim resolution failure",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentTelegramText = "";
+
+  // Telegram delivery fails (confirmed rejection). resolveFolderClaim throws on "failed".
+  globalThis.fetch = (async (_url: string, _init?: RequestInit) => {
+    const u = String(_url);
+    if (u.includes("api.telegram.org")) {
+      const body = _init?.body ? JSON.parse(String(_init.body)) : {};
+      sentTelegramText = body.text || "";
+      return new Response(JSON.stringify({ ok: false, description: "Internal Server Error" }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    let resolveFailedCalled = false;
+    let resolveCompletedCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => true,
+      resolveFolderClaim: async (_opaqueId: string, status: "completed" | "failed") => {
+        if (status === "failed") {
+          resolveFailedCalled = true;
+          throw new Error("DO storage write failed on failed");
+        }
+        if (status === "completed") resolveCompletedCalled = true;
+      },
+    };
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`, claims);
+
+    assert.strictEqual(resolveFailedCalled, true, "resolve as failed was attempted");
+    assert.strictEqual(resolveCompletedCalled, false, "claim NOT resolved as completed");
+    // User-facing notification was still sent despite resolve failure.
+    assert.match(sentTelegramText, /could not be delivered/, "Workspace notification about delivery failure sent despite resolve failure");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "no pending action after delivery failure");
   } finally {
     globalThis.fetch = originalFetch;
   }
