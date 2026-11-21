@@ -93,22 +93,36 @@ This section is **Architect guidance**. It tells the Architect how to delegate w
 
 ### Evidence-based agent profiles
 
-The Architect maintains a profile for each agent as practical experience accumulates. Profiles capture:
+The Architect maintains a profile for each agent as practical experience accumulates. Profiles distinguish two kinds of observation:
 
-- Agent identity and execution environment.
-- Demonstrated strengths and limitations.
-- Available tools and repository access.
-- Context-window and context-retention behaviour, where established.
+**Agent-level characteristics**
+
+- Execution environment.
+- Repository access and tool capabilities.
 - Repository navigation and code-editing behaviour.
 - Test execution and debugging capabilities.
-- GitHub, issue and PR interaction capabilities.
-- Effective prompt and instruction conventions.
+- GitHub, issue and PR interaction and reporting behaviour.
+- Agent-specific instruction handling and effective prompt and instruction conventions.
 - How well the agent handles staged work and complex context.
 - Recurring reliability problems and observed failure patterns.
-- Reporting and handback behaviour.
+- Demonstrated strengths and limitations at the agent level.
 - Supporting evidence and last-reviewed date.
 
-Rules for profiles:
+**Model-level characteristics**
+
+- Underlying model identity, when observable.
+- Provider and routing mode, when observable.
+- Reasoning and coding behaviour observed under that model.
+- Context-window, context-retention and instruction-following observations under that model, where established.
+
+Rules for attributing observations to a profile:
+
+- For each relevant observation, record the model and provider where known.
+- If Kilo is using Auto Free, record that routing mode rather than assuming a particular underlying model.
+- Do not attribute a model-specific failure or strength to the Kilo agent itself without sufficient evidence, and do not assume that changing models leaves agent behaviour unchanged.
+- Do not require model information when it cannot be reliably established; mark it unknown rather than guessing.
+
+Other profile rules:
 
 - Do not invent profiles for agents without sufficient evidence.
 - Distinguish recurring patterns from isolated mistakes.
@@ -129,6 +143,51 @@ The Architect adapts the handoff to the actual agent being used. Where appropria
 - Reporting format and GitHub handback expectations.
 
 Do not impose one rigid prompt format or task decomposition method on every agent. For example, Kilo Code may benefit from explicit staged instructions, while another agent may work more effectively from a different instruction structure — such differences are established through observed work, not assumptions.
+
+### Architect-owned impact assessment
+
+Operating principle: **the Architect owns the investigation of broader system implications before delegating non-trivial implementation work.**
+
+Before preparing an implementation handoff, the Architect must:
+
+1. Understand the requested change and its intended outcome.
+2. Inspect the existing implementation and trace the relevant production paths.
+3. Identify direct dependencies and indirect downstream effects.
+4. Identify affected components, integrations, workflows and data boundaries.
+5. Identify existing architecture, governance, security and execution contracts that apply.
+6. Determine what must change and what must remain unchanged.
+7. Establish the verification requirements for affected areas.
+8. Record uncertainties and dependencies that could not be verified.
+
+The Architect converts these findings into an **Architect Impact Assessment** included in the implementation handoff.
+
+The assessment should contain:
+
+- Requested change and intended outcome.
+- Investigation performed and relevant existing implementation.
+- Identified affected components and dependencies.
+- Direct and indirect consequences.
+- Required implementation changes.
+- Explicit no-change boundaries.
+- Existing contracts and constraints.
+- Required integration and regression checks.
+- Known uncertainties and unresolved questions.
+
+The assessment must be proportional to the risk and complexity of the change. Do not require exhaustive system-wide investigations for trivial changes.
+
+#### Implementation agent responsibilities
+
+The implementation agent receives the Architect's assessment as part of its assignment. It must:
+
+- Understand the supplied impact findings before implementation.
+- Account for identified dependencies and consequences.
+- Address the specified implementation and verification requirements.
+- Avoid changing explicitly protected areas.
+- Report when an assessment finding is inconsistent with the actual code.
+- Identify additional dependencies or consequences discovered during implementation.
+- Stop and seek Architect direction when discoveries require changes to approved architecture, governance, security, authority or scope.
+
+The agent must not silently discard or independently redefine the Architect's findings. The Architect remains responsible for reviewing whether the assessment was adequately addressed.
 
 ### Consistent ENIG standards
 
