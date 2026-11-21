@@ -2021,11 +2021,7 @@ export async function handleGoogleFolderSelection(
     return state;
   }
   if (!option || option.kind !== "folderlist" || !Array.isArray(option.folders)) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      "⚠️ That folder selection option is invalid or expired. Please submit the request again.",
-    );
+    await notifyWorkspaceTaskError("⚠️ That folder selection option is invalid or expired. Please submit the request again.");
     return state;
   }
 
@@ -2033,11 +2029,7 @@ export async function handleGoogleFolderSelection(
   const index = position === undefined ? NaN : Number(position);
   const picked = Number.isInteger(index) && index >= 0 && index < option.folders.length ? option.folders[index] : undefined;
   if (!picked) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      "⚠️ That folder selection is no longer current -- nothing was recorded.",
-    );
+    await notifyWorkspaceTaskError("⚠️ That folder selection is no longer current -- nothing was recorded.");
     return state;
   }
 

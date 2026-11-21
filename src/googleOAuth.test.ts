@@ -3832,3 +3832,118 @@ test("Stage 4C: failed claim resolution failure — diagnostic logged, user noti
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Stage 4B: missing/expired option — Workspace notification transport throws, no claim, no consumption", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4b-missing-throw";
+  // Do NOT stage any option — it's missing/expired
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  // All Telegram fetch calls throw — including the notification attempt from
+  // notifyWorkspaceTaskError. The exception must be caught internally and never
+  // escape to generic WorkSession/Operations handling.
+  globalThis.fetch = (async () => {
+    throw new Error("Telegram transport failure");
+  }) as typeof fetch;
+
+  try {
+    let claimCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => {
+        claimCalled = true;
+        return true;
+      },
+      resolveFolderClaim: async () => {},
+    };
+
+    // Should not throw — notification transport failure is caught internally.
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, "nonexistent:0", claims);
+
+    assert.strictEqual(claimCalled, false, "missing option: claim NOT attempted when transport throws");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "missing option: no pending action");
+
+    // Option must NOT be consumed (nothing was staged, so nothing to consume).
+    const store = mockKv._rawStore;
+    let listExists = false;
+    for (const [key] of store.entries()) {
+      if (key.startsWith(`google_option:${workId}:`)) {
+        listExists = true;
+        break;
+      }
+    }
+    assert.strictEqual(listExists, false, "missing option: nothing consumed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Stage 4B: out-of-bounds folder position — Workspace notification transport throws, no claim, no consumption", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  const workId = "work-4b-oob-throw";
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "oob-throw@enig.com",
+    title: "OOB Throw Test",
+    content: "Testing out-of-bounds with transport failure",
+    folders: [{ id: "folder-1", name: "Folder One" }],
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  // All Telegram fetch calls throw — including the notification attempt from
+  // notifyWorkspaceTaskError. The exception must be caught internally.
+  globalThis.fetch = (async () => {
+    throw new Error("Telegram transport failure");
+  }) as typeof fetch;
+
+  try {
+    let claimCalled = false;
+    const claims = {
+      getFolderClaimStatus: async () => undefined,
+      claimFolderOption: async () => {
+        claimCalled = true;
+        return true;
+      },
+      resolveFolderClaim: async () => {},
+    };
+
+    // Position 99 is out of bounds (only 1 folder at index 0).
+    // Should not throw — notification transport failure is caught internally.
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:99`, claims);
+
+    assert.strictEqual(claimCalled, false, "out-of-bounds: claim NOT attempted when transport throws");
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "out-of-bounds: no pending action");
+
+    // Option must NOT be consumed — invalid selection never triggers consume.
+    const store = mockKv._rawStore;
+    let listExists = false;
+    for (const [key, value] of store.entries()) {
+      if (key.startsWith(`google_option:${workId}:`) && value.value.includes("folderlist")) {
+        listExists = true;
+        break;
+      }
+    }
+    assert.strictEqual(listExists, true, "out-of-bounds: option NOT consumed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
