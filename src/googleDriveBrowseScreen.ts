@@ -55,7 +55,7 @@ export async function saveBrowseScreen(
   const screenId = crypto.randomUUID().slice(0, 8); // 8 lowercase hex chars
   const key = `google_option:${workId}:${screenId}`;
   try {
-    // Exactly one kvPut, with the 30-minute TTL shared by option records.
+    // Browser screens expire after 30 minutes.
     await kvPut(env, key, JSON.stringify(screen), {
       expirationTtl: SCREEN_TTL_SECONDS,
     });
@@ -160,13 +160,15 @@ export function parseBrowseValue(
   if (code === "s") return { screenId, action: { type: "save" } };
   if (code === "b") return { screenId, action: { type: "back" } };
 
-  const match = /^(o|f)(0|[1-9][0-9]{0,2})$/.exec(code);
-  if (!match) return null;
+  const letter = code[0];
+  const rest = code.slice(1);
+  if (letter !== "o" && letter !== "f") return null;
+  if (!INDEX_PATTERN.test(rest)) return null;
   return {
     screenId,
     action: {
-      type: match[1] === "o" ? "open" : "file",
-      index: Number(match[2]), // 0-999, guaranteed by the pattern
+      type: letter === "o" ? "open" : "file",
+      index: Number(rest), // 0-999, guaranteed by INDEX_PATTERN
     },
   };
 }

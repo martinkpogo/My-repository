@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert";
 import type { BrowseAction, BrowseScreen } from "./googleDriveBrowseScreen";
-import type { DriveItem } from "./googleDriveBrowse";
 import type { Env } from "./types";
 import {
   saveBrowseScreen,
@@ -138,12 +137,12 @@ test("d) read: missing key / invalid JSON / wrong kind -> null", async () => {
   );
 
   const wrongFieldType = env();
-  await wrongKind.STATE_KV.put(
+  await wrongFieldType.STATE_KV.put(
     keyFor(SCREEN_ID),
     JSON.stringify({ ...screen, truncated: "yes" }),
   );
   assert.strictEqual(
-    await readBrowseScreen(wrongKind, WORK_ID, SCREEN_ID),
+    await readBrowseScreen(wrongFieldType, WORK_ID, SCREEN_ID),
     null,
     "wrong field type -> null",
   );
@@ -191,6 +190,26 @@ test("g) buildBrowseCallback: byte limit and index range", async () => {
     buildBrowseCallback(WORK_ID, SCREEN_ID, { type: "open", index: 3.5 }),
     null,
     "non-integer -> null",
+  );
+});
+
+test("j) buildBrowseCallback returns null when the result exceeds 64 bytes", async () => {
+  // 41 ASCII chars -> 13 + 41 + 1 + 8 + 1 + 1 = 65 bytes > 64 -> null.
+  const longAscii = "a".repeat(41);
+  assert.strictEqual(
+    buildBrowseCallback(longAscii, SCREEN_ID, { type: "save" }),
+    null,
+    "41-char ASCII workId with save exceeds 64 bytes -> null",
+  );
+
+  // "é" + 36 ASCII = 37 characters but 38 UTF-8 bytes:
+  // 13 + 38 + 1 + 8 + 1 + 4 = 65 bytes > 64 -> null.
+  // Proves bytes are counted, not characters.
+  const longUtf8 = "é" + "a".repeat(36);
+  assert.strictEqual(
+    buildBrowseCallback(longUtf8, SCREEN_ID, { type: "open", index: 999 }),
+    null,
+    "37-char workId (38 UTF-8 bytes) with open 999 exceeds 64 bytes -> null",
   );
 });
 
