@@ -2361,6 +2361,7 @@ export async function handleGoogleFolderSelection(
         type: "Activity",
         activity: `Google Sheet creation proposed for '${title}' in folder '${folderName}' (${folderId}) for account '${accountIdentifier}'`,
         outcome: "Active",
+        workId: state.workId,
       }, { throwOnError: true });
     } catch (err) {
       // Telegram was delivered successfully; activity logging failed.
