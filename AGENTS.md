@@ -620,9 +620,3 @@ For Draft PR work, this evidence becomes the completion report written into the 
 - If no eligible execution path exists, stop, hold, or use an explicitly approved human-controlled path.
 
 These constraints, the Handoff identity-token boundary, fail-closed behavior, the Unit Manifest/Action Registry rule, mandatory operating-model reading, and synchronized documentation remain binding for every implementation agent.
-
-## Environment limits (phone / Termux)
-- This repo runs on a phone inside Termux + proot Ubuntu. It is slow.
-- Shell commands have a 30-second hard timeout.
-- Do NOT run `npm run typecheck`, `tsc`, tests, or builds yourself. Ask me to run them and wait for me to report the result.
-- Do not retry commands that time out. Stop and ask me instead.
