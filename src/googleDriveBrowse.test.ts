@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert";
-import { listDriveFolderContents } from "./googleDriveBrowse";
+import {
+  listDriveFolderContents,
+  getMyDriveRoot,
+} from "./googleDriveBrowse";
 
 // Fetch replacement pattern copied from src/googleOAuth.test.ts: assign
 // globalThis.fetch, restore it in finally, so no test leaks into the next.
@@ -219,6 +222,97 @@ test("l) webViewLink is passed through when present, omitted when absent", async
       const [linked, plain] = result.items;
       assert.strictEqual(linked.webViewLink, "https://drive.google.com/file/d/a/view");
       assert.strictEqual(plain.webViewLink, undefined);
+    },
+  );
+});
+
+test("m) getMyDriveRoot: exactly one fetch to files/root with id,name fields and Bearer auth", async () => {
+  await withMockFetch(
+    () => jsonResponse({ id: "0AAbc_123-x", name: "My Drive" }),
+    async (calls) => {
+      const result = await getMyDriveRoot("token-abc123");
+      assert.strictEqual(result.ok, true);
+      if (!result.ok) return;
+      assert.strictEqual(calls.length, 1, "EXACTLY one fetch call");
+      assert.strictEqual(calls[0].url, "https://www.googleapis.com/drive/v3/files/root?fields=id,name");
+      assert.strictEqual(calls[0].init?.method, "GET");
+      const headers = new Headers(calls[0].init?.headers);
+      assert.strictEqual(headers.get("Authorization"), "Bearer token-abc123");
+      assert.deepStrictEqual(result, { ok: true, id: "0AAbc_123-x", name: "My Drive" });
+    },
+  );
+});
+
+test("n) getMyDriveRoot: missing or empty name -> ok, name \"My Drive\"", async () => {
+  for (const body of [{ id: "0AAbc_123-x" }, { id: "0AAbc_123-x", name: "" }]) {
+    await withMockFetch(
+      () => jsonResponse(body),
+      async () => {
+        const result = await getMyDriveRoot("tok");
+        assert.deepStrictEqual(result, { ok: true, id: "0AAbc_123-x", name: "My Drive" });
+      },
+    );
+  }
+});
+
+test("o) getMyDriveRoot: id === \"root\" -> ok false, reason malformed", async () => {
+  await withMockFetch(
+    () => jsonResponse({ id: "root", name: "My Drive" }),
+    async () => {
+      const result = await getMyDriveRoot("tok");
+      assert.deepStrictEqual(result, { ok: false, reason: "malformed" });
+    },
+  );
+});
+
+test("p) getMyDriveRoot: id missing / not a string / contains / or ' -> reason malformed", async () => {
+  for (const body of [
+    { name: "My Drive" },
+    { id: 12345, name: "My Drive" },
+    { id: "a/b", name: "My Drive" },
+    { id: "a'b", name: "My Drive" },
+    { id: "a;b", name: "My Drive" },
+  ]) {
+    await withMockFetch(
+      () => jsonResponse(body),
+      async () => {
+        const result = await getMyDriveRoot("tok");
+        assert.deepStrictEqual(result, { ok: false, reason: "malformed" });
+      },
+    );
+  }
+});
+
+test("q) getMyDriveRoot: HTTP 401 and HTTP 404 -> reason http with status", async () => {
+  for (const status of [401, 404]) {
+    await withMockFetch(
+      () => new Response("denied", { status }),
+      async () => {
+        const result = await getMyDriveRoot("tok");
+        assert.deepStrictEqual(result, { ok: false, reason: "http", status });
+      },
+    );
+  }
+});
+
+test("r) getMyDriveRoot: fetch throws -> reason network", async () => {
+  await withMockFetch(
+    () => {
+      throw new Error("connection reset");
+    },
+    async () => {
+      const result = await getMyDriveRoot("tok");
+      assert.deepStrictEqual(result, { ok: false, reason: "network" });
+    },
+  );
+});
+
+test("s) getMyDriveRoot: invalid JSON body -> reason malformed", async () => {
+  await withMockFetch(
+    () => new Response("<html>not json</html>", { status: 200, headers: { "content-type": "text/html" } }),
+    async () => {
+      const result = await getMyDriveRoot("tok");
+      assert.deepStrictEqual(result, { ok: false, reason: "malformed" });
     },
   );
 });
