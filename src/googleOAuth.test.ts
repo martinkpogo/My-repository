@@ -36,6 +36,7 @@ import {
   peekOpaqueOption,
 } from "./googleOAuth";
 import { buildProposalDocLayout } from "./proposalRedline";
+import { parseCallbackData } from "./telegramCallbackData";
 import type { WorkState } from "./types";
 
 function createMockKv() {
@@ -1834,4 +1835,88 @@ test("handleGoogleActionApproval registers the created sheet for comment-trigger
   assert.strictEqual(watched.length, 1);
   assert.strictEqual(watched[0].spreadsheetId, createdSheetId);
   assert.strictEqual(watched[0].accountIdentifier, "owner@enig.com");
+});
+
+test("Round-trip: index.ts callback parsing of the second folder button picks that folder (no 'no longer current')", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const originalFetch = globalThis.fetch;
+
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-roundtrip", refresh_token: "refresh-roundtrip", expires_in: 3600 },
+    "roundtrip@enig.com",
+  );
+
+  const workId = "work-roundtrip-1";
+  const accountOptionId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "account",
+    accountIdentifier: "roundtrip@enig.com",
+    title: "Round Trip Doc",
+    content: "Round trip content",
+  });
+
+  const state: WorkState = {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  let sentButtons: any[] = [];
+  let sentText = "";
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.includes("googleapis.com/drive/v3/files")) {
+      return new Response(
+        JSON.stringify({
+          files: [
+            { id: "folder-a", name: "Folder A" },
+            { id: "folder-b", name: "Folder B" },
+            { id: "folder-c", name: "Folder C" },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentText = body.text || "";
+      sentButtons = body.reply_markup?.inline_keyboard || [];
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    // Build a REAL folder picker through the account-selection stage, exactly
+    // as production does, and take the SECOND folder button's callback_data
+    // from the Telegram message that was sent.
+    await handleGoogleAccountSelection(fakeEnv, state, accountOptionId);
+    assert.strictEqual(sentButtons.length, 3, "one button per folder row");
+    const secondFolderData = sentButtons[1][0].callback_data;
+    assert.match(secondFolderData, /^googlefolder:work-roundtrip-1:[a-f0-9-]+:1$/);
+
+    // RED/GREEN seam: index.ts parses the callback_data before the handler
+    // ever sees it. This test performs that same parse so a truncating parse
+    // fails here instead of in production.
+    const { action, workId: parsedWorkId, value } = parseCallbackData(secondFolderData);
+    assert.strictEqual(action, "googlefolder");
+    assert.strictEqual(parsedWorkId, workId);
+
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, value);
+
+    assert.strictEqual(
+      updatedState.pendingGoogleAction?.folderId,
+      "folder-b",
+      "the SECOND folder must be the one chosen",
+    );
+    assert.ok(
+      !sentText.includes("no longer current"),
+      `no "no longer current" message may be sent, got: ${sentText}`,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

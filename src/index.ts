@@ -48,6 +48,7 @@ import { consumeEnigSuggestion, ENIG_SUGGEST_CALLBACK } from "./enigSuggestion";
 import { consumeRecordsOffer, ENIG_RECORDS_CALLBACK } from "./enigRecords";
 import { enigChatReply } from "./chat";
 import { claimTelegramUpdate } from "./telegramDedup";
+import { parseCallbackData } from "./telegramCallbackData";
 // Installs universal web research on the shared AI executor (Martin, 2026-11-11).
 import { handleWebResearchCallback } from "./runtime/webResearch";
 // Installs the shared Consultancy Profile context for every Hat step (Martin, 2026-11-13).
@@ -791,7 +792,7 @@ async function handleUpdate(env: Env, update: TelegramUpdate): Promise<void> {
       return;
     }
     const data = cq.data ?? "";
-    const [action, workId, value] = data.split(":");
+    const { action, workId, value } = parseCallbackData(data);
     await answerCallbackQuery(env, cq.id);
 
     if (action === "switch") {
