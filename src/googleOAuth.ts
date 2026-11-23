@@ -1511,8 +1511,8 @@ export async function consumeOpaqueOption(
 }
 
 /**
- * Read a staged option WITHOUT consuming it. Paging the folder picker needs
- * this: the "📂 More folders" button re-renders from the same list, so the
+ * Read a staged option WITHOUT consuming it. Paging needs
+ * this: the pager re-renders from the same list, so the
  * option must survive the tap (consume deletes it, which is what makes a
  * folder pick single-use -- you cannot pick the same list twice).
  */
@@ -1530,14 +1530,6 @@ export async function peekOpaqueOption(
     return null;
   }
 }
-
-/**
- * How many Drive folders the picker shows per page before a "More folders"
- * button. The full list is staged as ONE option (see
- * handleGoogleFolderSelection); the buttons carry positions into it, so
- * paging costs no extra writes.
- */
-const FOLDER_PICKER_PAGE_SIZE = 10;
 
 export const GoogleDocCreationCapability = {
   id: "workspace.google_doc_creation",
@@ -1899,7 +1891,7 @@ async function renderBrowseScreen(
   }
   buttons.push([{ text: "✅ Save here", callback_data: saveData }]);
 
-  // The three header variants are renderFolderPage's, word for word; only
+  // The three header variants match the old picker's wording, word for word; only
   // its final "Select ..." sentence is replaced by the browser's own line.
   const context: Record<string, any> = screen.context;
   const header =
@@ -1919,7 +1911,7 @@ async function renderBrowseScreen(
     (screen.truncated ? `\n_Showing the first ${MAX_BROWSE_ITEMS} items._` : "");
   await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
-  // Logging is exactly renderFolderPage's: same entry names, same fields.
+  // Logging matches the old picker: same entry names, same fields.
 // Only log when options.logPresented is true (the top screen's logging
 // stays exactly as it is now because handleGoogleAccountSelection passes
 // { logPresented: true }).
@@ -1944,52 +1936,6 @@ async function renderBrowseScreen(
   return state;
 }
 
-/**
- * Renders one page of the folder picker from a staged folder list. The list
- * itself is consumed only when a folder is actually picked; paging keeps it.
- */
-async function renderFolderPage(
-  env: Env,
-  state: WorkState,
-  target: HatMessageTarget,
-  option: Record<string, any>,
-  offset: number,
-): Promise<WorkState> {
-  const folders: Array<{ id: string; name: string }> = option.folders;
-  const page = folders.slice(offset, offset + FOLDER_PICKER_PAGE_SIZE);
-  const buttons: InlineButton[][] = [];
-  for (let i = 0; i < page.length; i++) {
-    const folder = page[i]!;
-    buttons.push([{ text: `📁 ${folder.name}`, callback_data: `googlefolder:${state.workId}:${option._listOpaqueId}:${offset + i}` }]);
-  }
-  if (offset + page.length < folders.length) {
-    buttons.push([{ text: "📂 More folders", callback_data: `googlefolder:${state.workId}:${option._listOpaqueId}:more` }]);
-  }
-  const isSmoke = option.smoke === true;
-  const messageText = isSmoke
-    ? `🧪 *GOVERNED TOOL REGISTRY SMOKE*\n\n*Account*: ${option.accountIdentifier}\n\nSelect the *disposable* Drive folder for the smoke document (never the production proposal folder):`
-    : option.delivery === true
-      ? `*Save approved output to Google Drive*\n\n*Account*: ${option.accountIdentifier}\n*Title*: ${option.title}\n\nSelect the target Drive folder -- you will confirm once more before anything is created:`
-      : `*Google Workspace Action*: ${option.docType === "sheet" ? "Create Google Sheet" : "Create Google Doc"}\n\n*Account*: ${option.accountIdentifier}\n*Title*: ${option.title}\n\nSelect the target Drive folder:`;
-  await sendWorkspaceHatMessage(env, target, messageText, buttons);
-  if (isSmoke) {
-    await logActivity(env, {
-      entry: "Google Docs Registry smoke: folder picker presented",
-      type: "Activity",
-      activity: `Registry smoke Drive folder picker presented for account '${option.accountIdentifier}'`,
-      outcome: "Active",
-      workId: state.workId,
-    });
-  } else {
-    await logActivity(env, {
-      entry: "Google Drive folders presented",
-      type: "Activity",
-      activity: `Drive folder picker presented for account '${option.accountIdentifier}'`,
-      outcome: "Active",
-    });
-  }
-  return state;
-}
 
 async function proceedWithChosenFolder(
   env: Env,
@@ -2202,44 +2148,12 @@ export async function handleGoogleFolderSelection(
   const browse = parseBrowseValue(opaqueOptionId);
   if (browse) return handleDriveBrowseTap(env, state, browse);
 
-  // The callback value is "<opaqueId>:<position>|more": index.ts splits
-  // callback_data on ":" into [action, workId, value], and opaqueIds are
-  // 8 hex characters with no colon of their own, so the position is the last
-  // segment and the opaque id is everything before it.
-  const colon = opaqueOptionId.lastIndexOf(":");
-  const opaqueId = colon === -1 ? opaqueOptionId : opaqueOptionId.slice(0, colon);
-  const position = colon === -1 ? undefined : opaqueOptionId.slice(colon + 1);
-
-  const option = await peekOpaqueOption(env, state.workId, opaqueId);
-  if (!option || option.kind !== "folderlist" || !Array.isArray(option.folders)) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      "⚠️ That folder selection option is invalid or expired. Please submit the request again.",
-    );
-    return state;
-  }
-
-  // "more" re-renders the same list from the next page; anything else consumes
-  // the list and picks that folder.
-  if (position === "more") {
-    return renderFolderPage(env, state, target, option, FOLDER_PICKER_PAGE_SIZE);
-  }
-  const index = position === undefined ? NaN : Number(position);
-  const picked = Number.isInteger(index) && index >= 0 && index < option.folders.length ? option.folders[index] : undefined;
-  if (!picked) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      "⚠️ That folder selection is no longer current -- nothing was recorded.",
-    );
-    return state;
-  }
-  // Consuming the list makes the pick single-use: a replayed button cannot
-  // re-pick the same folder (the same discipline as the old per-folder
-  // consume, which deleted each option on tap).
-  await kvDelete(env, `google_option:${state.workId}:${opaqueId}`);
-  return proceedWithChosenFolder(env, state, target, option, picked.id, picked.name);
+  await sendWorkspaceHatMessage(
+    env,
+    target,
+    "⚠️ That folder selection is no longer current -- nothing was recorded.",
+  );
+  return state;
 }
 
 /** Handle a Drive browser tap on a folder or button.
