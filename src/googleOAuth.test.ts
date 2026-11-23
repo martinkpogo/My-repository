@@ -2659,11 +2659,11 @@ test("Task 7: file, save and back taps report unavailability with zero Drive cal
     await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:f1`);
     assert.ok(drive.texts[drive.texts.length - 1]!.includes("No Google Drive link is available for this file."), "file tap: expected 'No Google Drive link is available for this file.' (was 'isn't available yet')");
     await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:s`);
-    assert.ok(drive.texts[drive.texts.length - 1]!.includes("isn't available yet"), "save tap: expected 'isn't available yet'");
+    assert.ok(drive.texts[drive.texts.length - 1]!.includes("Create Google Doc"), "save tap: now leads into the Create Google Doc flow (was 'isn't available yet')");
     await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:b`);
     assert.ok(
-      drive.texts[drive.texts.length - 1]!.includes("You're already at the top folder."),
-      `back on top screen: expected 'You\\'re already at the top folder.', got: ${drive.texts[drive.texts.length - 1]}`,
+      drive.texts[drive.texts.length - 1]!.includes("has expired"),
+      `back after save consumed the screen: expected 'has expired', got: ${drive.texts[drive.texts.length - 1]}`,
     );
 
     assert.strictEqual(counters.driveUrls.length, beforeDrive, "ZERO Drive calls for file/save/back taps");
@@ -3235,7 +3235,7 @@ test("Task 8: file and save taps still answer isn't available yet", async () => 
     // Save tap on the opened screen.
     const saveValue = `${screenIdOf(drive.pickers[1]![0])}:s`;
     await handleGoogleFolderSelection(fakeEnv, browseState(workId), saveValue);
-    assert.ok(drive.texts[drive.texts.length - 1]!.includes("isn't available yet"), "save tap: expected isn't available yet");
+    assert.ok(drive.texts[drive.texts.length - 1]!.includes("Create Google Doc"), "save tap: now leads into the Create Google Doc flow (was 'isn't available yet')");
 
     assert.strictEqual(counters.driveUrls.length, beforeListing, "ZERO Drive calls for file/save taps");
     assert.strictEqual(writes(), 0, "ZERO storage writes for file/save taps");
@@ -3696,7 +3696,458 @@ test("Task 9: save taps still answer isn't available yet", async () => {
     await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
     const saveValue = `${screenIdOf(drive.pickers[0]![0])}:s`;
     await handleGoogleFolderSelection(fakeEnv, browseState(workId), saveValue);
-    assert.ok(drive.texts[drive.texts.length - 1]!.includes("isn't available yet"), "save tap: expected isn't available yet");
+    assert.ok(drive.texts[drive.texts.length - 1]!.includes("Create Google Doc"), "save tap: now leads into the Create Google Doc flow (was 'isn't available yet')");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Drive file browser (Task 10): ✅ Save here connects to the existing save flows.
+// ---------------------------------------------------------------------------
+
+test("Task 10: doc flow -> open a folder, tap Save -> pendingGoogleAction is create_doc with the chosen folderId", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t10-a";
+  const folderId = "folder-a";
+  const folderName = "A folder";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: folderId, name: folderName, mimeType: "application/vnd.google-apps.folder" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    const state = browseState(workId);
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    const openValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, `📁 ${folderName}`)[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, state, openValue);
+
+    const beforeDrive = counters.driveUrls.length;
+    const saveValue = `${screenIdOf(drive.pickers[1]![0])}:s`;
+    await handleGoogleFolderSelection(fakeEnv, state, saveValue);
+
+    assert.deepStrictEqual(state.pendingGoogleAction, {
+      type: "create_doc",
+      folderId,
+      accountIdentifier: "user@enig.com",
+      title: "Browse Doc",
+      content: "Browse body",
+    });
+
+    const lastText = drive.texts[drive.texts.length - 1]!;
+    assert.ok(lastText.includes("Create Google Doc"), `doc flow message missing, got: ${lastText}`);
+    assert.ok(lastText.includes(`*Folder*: ${folderName}`), `folder name missing, got: ${lastText}`);
+
+    const lastPicker = drive.pickers[drive.pickers.length - 1]!.flat();
+    assert.ok(lastPicker.some((b: any) => String(b.callback_data).endsWith("googleaction:" + workId + ":approve")), "approve button missing");
+    assert.ok(lastPicker.some((b: any) => String(b.callback_data).endsWith("googleaction:" + workId + ":reject")), "reject button missing");
+
+    assert.strictEqual(counters.driveUrls.length, beforeDrive, "ZERO Drive calls during save");
+    assert.strictEqual(mockKv._rawStore.get(`google_option:${workId}:${screenIdOf(drive.pickers[1]![0])}`), undefined, "tapped screen consumed (deleted)");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 10: sheet flow -> pendingGoogleAction is create_sheet with the same rows and chosen folderId", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t10-b";
+  const folderId = "folder-b";
+  const folderName = "B folder";
+  const rows = [["Date", "Task"], ["2026-01", "Review"]];
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { docType: "sheet", rows });
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: folderId, name: folderName, mimeType: "application/vnd.google-apps.folder" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    const state = browseState(workId);
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    const openValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, `📁 ${folderName}`)[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, state, openValue);
+
+    const saveValue = `${screenIdOf(drive.pickers[1]![0])}:s`;
+    await handleGoogleFolderSelection(fakeEnv, state, saveValue);
+
+    assert.deepStrictEqual(state.pendingGoogleAction, {
+      type: "create_sheet",
+      folderId,
+      accountIdentifier: "user@enig.com",
+      title: "Browse Doc",
+      rows,
+    });
+
+    const lastText = drive.texts[drive.texts.length - 1]!;
+    assert.ok(lastText.includes("Create Google Sheet"), `sheet flow message missing, got: ${lastText}`);
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 10: delivery flow -> stored delivery_confirm option has the chosen folderId/folderName/accountIdentifier/title; outputdelivery buttons; NO pendingGoogleAction", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t10-c";
+  const folderId = "folder-c";
+  const folderName = "C folder";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, {
+    delivery: true,
+    docType: "sheet",
+    title: "Report",
+    content: "Report body",
+    rows: [["Col"]],
+  });
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: folderId, name: folderName, mimeType: "application/vnd.google-apps.folder" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    const state = browseState(workId);
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    const openValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, `📁 ${folderName}`)[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, state, openValue);
+
+    const saveValue = `${screenIdOf(drive.pickers[1]![0])}:s`;
+    await handleGoogleFolderSelection(fakeEnv, state, saveValue);
+
+    assert.strictEqual(state.pendingGoogleAction, undefined, "no pendingGoogleAction for delivery flow");
+
+    const lastPicker = drive.pickers[drive.pickers.length - 1]!.flat();
+    const confirmBtn = lastPicker.find((b: any) => String(b.callback_data).startsWith("outputdelivery:" + workId + ":"));
+    const dismissBtn = lastPicker.find((b: any) => String(b.callback_data) === "outputdelivery:" + workId + ":dismiss");
+    assert.ok(confirmBtn, "delivery confirm button missing");
+    assert.ok(dismissBtn, "delivery dismiss button missing");
+
+    const confirmOpaqueId = String(confirmBtn.callback_data).split(":")[2]!;
+    const stored = storedScreen(mockKv, workId, confirmOpaqueId);
+    assert.strictEqual(stored.kind, "delivery_confirm");
+    assert.strictEqual(stored.folderId, folderId);
+    assert.strictEqual(stored.folderName, folderName);
+    assert.strictEqual(stored.accountIdentifier, "user@enig.com");
+    assert.strictEqual(stored.title, "Report");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 10: smoke flow -> pendingSmokeSelection has the chosen folderId; smoke_confirm stored; googlesmokeconfirm buttons; NO googleaction buttons", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t10-d";
+  const folderId = "folder-d";
+  const folderName = "D folder";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { smoke: true });
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: folderId, name: folderName, mimeType: "application/vnd.google-apps.folder" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    const state = browseState(workId);
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    const openValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, `📁 ${folderName}`)[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, state, openValue);
+
+    const saveValue = `${screenIdOf(drive.pickers[1]![0])}:s`;
+    await handleGoogleFolderSelection(fakeEnv, state, saveValue);
+
+    assert.ok(state.pendingSmokeSelection, "smoke selection pending");
+    assert.strictEqual(state.pendingSmokeSelection!.folderId, folderId);
+    assert.strictEqual(state.pendingSmokeSelection!.accountIdentifier, "user@enig.com");
+    assert.strictEqual(state.pendingSmokeSelection!.folderName, folderName);
+
+    const lastPicker = drive.pickers[drive.pickers.length - 1]!.flat();
+    const smokeBtn = lastPicker.find((b: any) => String(b.callback_data).startsWith("googlesmokeconfirm:" + workId + ":"));
+    assert.ok(smokeBtn, "smoke confirm button missing");
+    assert.ok(!lastPicker.some((b: any) => String(b.callback_data).includes("googleaction:")), "no googleaction buttons for smoke flow");
+
+    const confirmOpaqueId = String(smokeBtn.callback_data).split(":")[2]!;
+    const stored = storedScreen(mockKv, workId, confirmOpaqueId);
+    assert.strictEqual(stored.kind, "smoke_confirm");
+    assert.strictEqual(stored.folderId, folderId);
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 10: Save on the top screen -> folderId equals the fake root id (not 'root') and folder name 'My Drive'", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t10-e";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({ listing: { body: { files: [] } } });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    const state = browseState(workId);
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    const topScreenId = screenIdOf(drive.pickers[0]![0]);
+    assert.strictEqual(drive.pickers[0]!.length, 1, "top screen: only Save here");
+    assert.ok(drive.texts[0].includes("📂 *My Drive*"), `top screen names My Drive, got: ${drive.texts[0]}`);
+
+    const saveValue = `${topScreenId}:s`;
+    await handleGoogleFolderSelection(fakeEnv, state, saveValue);
+    assert.ok(state.pendingGoogleAction, "save set pendingGoogleAction");
+    assert.strictEqual(state.pendingGoogleAction!.folderId, BROWSE_ROOT_ID, "top-screen save binds the real root id");
+    assert.notStrictEqual(state.pendingGoogleAction!.folderId, "root", "top-screen save must not bind the shortcut 'root'");
+    const lastText = drive.texts[drive.texts.length - 1]!;
+    assert.ok(lastText.includes("*Folder*: My Drive"), `folder name missing, got: ${lastText}`);
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 10: a Save tap makes ZERO Drive calls", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t10-f";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({ listing: { body: { files: [] } } });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    const state = browseState(workId);
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    const beforeDrive = counters.driveUrls.length;
+    const saveValue = `${screenIdOf(drive.pickers[0]![0])}:s`;
+    await handleGoogleFolderSelection(fakeEnv, state, saveValue);
+
+    assert.strictEqual(counters.driveUrls.length, beforeDrive, "ZERO Drive calls during save");
+    assert.ok(drive.texts[drive.texts.length - 1]!.includes("Create Google Doc"), "save led to the doc flow");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 10: single use -> a second Save tap on the same screen answers 'has expired', pendingGoogleAction unchanged", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t10-g";
+  const folderId = "folder-g";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: folderId, name: "G folder", mimeType: "application/vnd.google-apps.folder" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    const state = browseState(workId);
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    const openValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, "📁 G folder")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, state, openValue);
+
+    const saveValue = `${screenIdOf(drive.pickers[1]![0])}:s`;
+    await handleGoogleFolderSelection(fakeEnv, state, saveValue);
+    const firstAction = state.pendingGoogleAction;
+    assert.ok(firstAction, "first save set pendingGoogleAction");
+
+    await handleGoogleFolderSelection(fakeEnv, state, saveValue);
+    const last = drive.texts[drive.texts.length - 1]!;
+    assert.ok(last.includes("has expired"), `second save expected has expired, got: ${last}`);
+    assert.deepStrictEqual(state.pendingGoogleAction, firstAction, "pendingGoogleAction unchanged by second save");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 10: an expired screen id -> has expired, nothing pending", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t10-h";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({ listing: { body: { files: [] } } });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    const state = browseState(workId);
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    const topScreenId = screenIdOf(drive.pickers[0]![0]);
+
+    mockKv._rawStore.delete(`google_option:${workId}:${topScreenId}`);
+
+    const saveValue = `${topScreenId}:s`;
+    await handleGoogleFolderSelection(fakeEnv, state, saveValue);
+
+    const last = drive.texts[drive.texts.length - 1]!;
+    assert.ok(last.includes("has expired"), `expected has expired, got: ${last}`);
+    assert.strictEqual(state.pendingGoogleAction, undefined, "nothing pending for expired screen");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 10: end to end -> after Save in the doc flow, approving creates the doc in the chosen folder", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t10-i";
+  const folderId = "folder-i";
+  const folderName = "I folder";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  let createdParents: string[] | null = null;
+  let sentTelegramText = "";
+  const pickers: any[][][] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const s = String(url);
+    if (s.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      sentTelegramText = body.text || "";
+      if (body.reply_markup?.inline_keyboard) pickers.push(body.reply_markup.inline_keyboard);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    if (s.includes("api.notion.com")) {
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (s === "https://www.googleapis.com/drive/v3/files" && (init?.method ?? "GET") === "POST") {
+      const body = JSON.parse(String(init?.body));
+      createdParents = body.parents;
+      return new Response(JSON.stringify({ id: "created-doc-id" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (s.includes("docs.googleapis.com/v1/documents") && s.includes(":batchUpdate")) {
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    if (s.includes("docs.googleapis.com/v1/documents/")) {
+      const docJson = '{"title":"Browse Doc","body":{"content":[{"paragraph":{"elements":[{"textRun":{"content":"Browse body"}}]}}]}}';
+      return new Response(docJson, { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (s.includes("googleapis.com/drive/v3/files/root")) {
+      return new Response(JSON.stringify({ id: "root-id-abc123", name: "My Drive" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (s.includes("googleapis.com/drive/v3/files")) {
+      return new Response(JSON.stringify({ files: [{ id: folderId, name: folderName, mimeType: "application/vnd.google-apps.folder" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const state = browseState(workId);
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    const openValue = parseCallbackData(String(rowWithText(pickers[0]!, `📁 ${folderName}`)[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, state, openValue);
+
+    const saveValue = `${screenIdOf(pickers[1]![0])}:s`;
+    await handleGoogleFolderSelection(fakeEnv, state, saveValue);
+    assert.ok(state.pendingGoogleAction, "save set pendingGoogleAction");
+
+    const updatedState = await handleGoogleActionApproval(fakeEnv, state, true);
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "approval consumed the action");
+    assert.deepStrictEqual(createdParents, [folderId], `create request parents should be [${folderId}], got: ${JSON.stringify(createdParents)}`);
+    assert.ok(sentTelegramText.includes("created and verified successfully"), `approval success message missing, got: ${sentTelegramText}`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Task 10: save from level 1, then Back on the level-1 screen's old message answers 'has expired' (screen consumed)", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t10-j";
+  const folderId = "folder-j";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: folderId, name: "J folder", mimeType: "application/vnd.google-apps.folder" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    const state = browseState(workId);
+    await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
+    const openValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, "📁 J folder")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, state, openValue);
+
+    const saveValue = `${screenIdOf(drive.pickers[1]![0])}:s`;
+    await handleGoogleFolderSelection(fakeEnv, state, saveValue);
+    assert.ok(state.pendingGoogleAction, "level-1 save set pendingGoogleAction");
+    const level1ScreenId = screenIdOf(drive.pickers[1]![0]);
+
+    const backValue = `${level1ScreenId}:b`;
+    await handleGoogleFolderSelection(fakeEnv, state, backValue);
+    const last = drive.texts[drive.texts.length - 1]!;
+    assert.ok(last.includes("has expired"), `Back on consumed screen expected has expired, got: ${last}`);
   } finally {
     globalThis.fetch = realFetch;
     drive.restore();

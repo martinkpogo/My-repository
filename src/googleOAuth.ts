@@ -1991,72 +1991,21 @@ async function renderFolderPage(
   return state;
 }
 
-export async function handleGoogleFolderSelection(
+async function proceedWithChosenFolder(
   env: Env,
   state: WorkState,
-  opaqueOptionId: string,
+  target: HatMessageTarget,
+  flow: Record<string, any>,
+  folderId: string,
+  folderName: string,
 ): Promise<WorkState> {
-  const target: HatMessageTarget = {
-    chatId: state.chatId,
-    threadId: state.threadId,
-    hat: state.hat,
-    workId: state.workId,
-  };
-
-  // Routing for Drive browser folder taps (Task 7): if the opaque option
-  // id is a browse value (screenId:code), route to handleDriveBrowseTap
-  // so tapping a 📁 folder opens it as a new screen. Old folderlist values
-  // (e.g. "ab12cd34:3" or "ab12cd34:more") are rejected by parseBrowseValue
-  // and fall through to the existing folderlist logic.
-  const browse = parseBrowseValue(opaqueOptionId);
-  if (browse) return handleDriveBrowseTap(env, state, browse);
-
-  // The callback value is "<opaqueId>:<position>|more": index.ts splits
-  // callback_data on ":" into [action, workId, value], and opaqueIds are
-  // 8 hex characters with no colon of their own, so the position is the last
-  // segment and the opaque id is everything before it.
-  const colon = opaqueOptionId.lastIndexOf(":");
-  const opaqueId = colon === -1 ? opaqueOptionId : opaqueOptionId.slice(0, colon);
-  const position = colon === -1 ? undefined : opaqueOptionId.slice(colon + 1);
-
-  const option = await peekOpaqueOption(env, state.workId, opaqueId);
-  if (!option || option.kind !== "folderlist" || !Array.isArray(option.folders)) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      "⚠️ That folder selection option is invalid or expired. Please submit the request again.",
-    );
-    return state;
-  }
-
-  // "more" re-renders the same list from the next page; anything else consumes
-  // the list and picks that folder.
-  if (position === "more") {
-    return renderFolderPage(env, state, target, option, FOLDER_PICKER_PAGE_SIZE);
-  }
-  const index = position === undefined ? NaN : Number(position);
-  const picked = Number.isInteger(index) && index >= 0 && index < option.folders.length ? option.folders[index] : undefined;
-  if (!picked) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      "⚠️ That folder selection is no longer current -- nothing was recorded.",
-    );
-    return state;
-  }
-  // Consuming the list makes the pick single-use: a replayed button cannot
-  // re-pick the same folder (the same discipline as the old per-folder
-  // consume, which deleted each option on tap).
-  await kvDelete(env, `google_option:${state.workId}:${opaqueId}`);
-  const { accountIdentifier, title, content, rows } = option;
-  const folderId = picked.id;
-  const folderName = picked.name;
-  const docType: "doc" | "sheet" = option.docType === "sheet" ? "sheet" : "doc";
+  const { accountIdentifier, title, content, rows } = flow;
+  const docType: "doc" | "sheet" = flow.docType === "sheet" ? "sheet" : "doc";
   // Shared output-delivery flow (src/outputDelivery.ts): the folder option
   // carries `delivery: true`. Route to the final explicit confirmation, which
   // mints the ApprovalProof (bound to this exact folder) and creates through
   // the shared Tool Registry -- never the legacy pendingGoogleAction path.
-  const delivery = option.delivery === true;
+  const delivery = flow.delivery === true;
 
   // Tool Registry SMOKE flow (src/googleDocsSmokeFlow.ts): the folder option
   // was staged carrying `smoke: true`. Instead of the normal creation
@@ -2064,7 +2013,7 @@ export async function handleGoogleFolderSelection(
   // branch never touches, so the legacy document-creation path cannot be
   // reached from here), record the selected target on the Work and stage an
   // explicit smoke confirmation bound to this exact Work + account + folder.
-  if (option.smoke === true) {
+  if (flow.smoke === true) {
     let confirmOpaqueId: string;
     try {
       confirmOpaqueId = await saveOpaqueOption(env, state.workId, {
@@ -2233,6 +2182,66 @@ export async function handleGoogleFolderSelection(
   return state;
 }
 
+export async function handleGoogleFolderSelection(
+  env: Env,
+  state: WorkState,
+  opaqueOptionId: string,
+): Promise<WorkState> {
+  const target: HatMessageTarget = {
+    chatId: state.chatId,
+    threadId: state.threadId,
+    hat: state.hat,
+    workId: state.workId,
+  };
+
+  // Routing for Drive browser folder taps (Task 7): if the opaque option
+  // id is a browse value (screenId:code), route to handleDriveBrowseTap
+  // so tapping a 📁 folder opens it as a new screen. Old folderlist values
+  // (e.g. "ab12cd34:3" or "ab12cd34:more") are rejected by parseBrowseValue
+  // and fall through to the existing folderlist logic.
+  const browse = parseBrowseValue(opaqueOptionId);
+  if (browse) return handleDriveBrowseTap(env, state, browse);
+
+  // The callback value is "<opaqueId>:<position>|more": index.ts splits
+  // callback_data on ":" into [action, workId, value], and opaqueIds are
+  // 8 hex characters with no colon of their own, so the position is the last
+  // segment and the opaque id is everything before it.
+  const colon = opaqueOptionId.lastIndexOf(":");
+  const opaqueId = colon === -1 ? opaqueOptionId : opaqueOptionId.slice(0, colon);
+  const position = colon === -1 ? undefined : opaqueOptionId.slice(colon + 1);
+
+  const option = await peekOpaqueOption(env, state.workId, opaqueId);
+  if (!option || option.kind !== "folderlist" || !Array.isArray(option.folders)) {
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      "⚠️ That folder selection option is invalid or expired. Please submit the request again.",
+    );
+    return state;
+  }
+
+  // "more" re-renders the same list from the next page; anything else consumes
+  // the list and picks that folder.
+  if (position === "more") {
+    return renderFolderPage(env, state, target, option, FOLDER_PICKER_PAGE_SIZE);
+  }
+  const index = position === undefined ? NaN : Number(position);
+  const picked = Number.isInteger(index) && index >= 0 && index < option.folders.length ? option.folders[index] : undefined;
+  if (!picked) {
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      "⚠️ That folder selection is no longer current -- nothing was recorded.",
+    );
+    return state;
+  }
+  // Consuming the list makes the pick single-use: a replayed button cannot
+  // re-pick the same folder (the same discipline as the old per-folder
+  // consume, which deleted each option on tap).
+  await kvDelete(env, `google_option:${state.workId}:${opaqueId}`);
+  return proceedWithChosenFolder(env, state, target, option, picked.id, picked.name);
+}
+
 /** Handle a Drive browser tap on a folder or button.
  *  - "file", "save": show unavailable message
  *  - "open": open the selected folder as a new browse screen
@@ -2252,8 +2261,17 @@ export async function handleDriveBrowseTap(
   const { type } = tap.action;
 
   if (type === "save") {
-    await sendWorkspaceHatMessage(env, target, "⚠️ That button isn't available yet.");
-    return state;
+    const screen = await readBrowseScreen(env, state.workId, tap.screenId);
+    if (!screen) {
+      await sendWorkspaceHatMessage(env, target, "⚠️ That folder view has expired. Please start the save again.");
+      return state;
+    }
+    if (typeof screen.context.accountIdentifier !== "string") {
+      await sendWorkspaceHatMessage(env, target, "⚠️ That folder view has expired. Please start the save again.");
+      return state;
+    }
+    await kvDelete(env, `google_option:${state.workId}:${tap.screenId}`);
+    return proceedWithChosenFolder(env, state, target, screen.context, screen.folderId, screen.folderName);
   }
 
   if (type === "file") {
@@ -2349,7 +2367,6 @@ export async function handleDriveBrowseTap(
     return renderBrowseScreen(env, state, target, saved.screenId, newScreen, { logPresented: false });
   }
 
-  await sendWorkspaceHatMessage(env, target, "⚠️ That button isn't available yet.");
   return state;
 }
 
