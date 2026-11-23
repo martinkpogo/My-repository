@@ -302,22 +302,28 @@ test("smoke account selection stages smoke-flagged folder options with no creati
   const env = fakeEnv({ ...googleAccountSeed(ACCOUNT), ...googleAccountSeed(SECOND_ACCOUNT) });
   const state = smokeState(workId);
   const { calls, telegram } = installFake(t, (call) => {
-    if (call.url.includes("/drive/v3/files")) return json({ files: [{ id: FOLDER_ID, name: FOLDER_NAME }] });
+    // The browser makes TWO calls: files/root (answered with { id, name })
+    // and the listing of that root (answered with { files: [...] }).
+    if (call.url.includes("/drive/v3/files/root")) return json({ id: "root-id-abc123", name: "My Drive" });
+    if (call.url.includes("/drive/v3/files")) {
+      return json({ files: [{ id: FOLDER_ID, name: FOLDER_NAME, mimeType: "application/vnd.google-apps.folder" }] });
+    }
     return json({});
   });
 
   const opaqueId = await stageOption(env, workId, { kind: "account", smoke: true, accountIdentifier: ACCOUNT });
   const next = await handleGoogleAccountSelection(env, state, opaqueId);
 
-  // The smoke-flagged folder list is ONE staged option (2026-11-18: one write,
-  // not one per folder) and drops all creation payload.
-  const folderOptions = stagedOptions(env, workId).filter((o: any) => o.kind === "folderlist");
-  assert.equal(folderOptions.length, 1);
-  assert.equal(folderOptions[0].smoke, true);
-  assert.equal(folderOptions[0].folders?.[0]?.id, FOLDER_ID, "the list carries the Drive folder");
-  assert.equal(folderOptions[0].title, undefined);
-  assert.equal(folderOptions[0].content, undefined);
-  assert.equal(folderOptions[0].docType, undefined);
+  // The smoke-flagged browse screen is ONE stored record (2026-11-18: one
+  // write, not one per folder) and its context drops all creation payload.
+  const screens = stagedOptions(env, workId).filter((o: any) => o.kind === "drivebrowse");
+  assert.equal(screens.length, 1);
+  assert.equal(screens[0].folderId, "root-id-abc123");
+  assert.equal(screens[0].context.smoke, true);
+  assert.equal(screens[0].items[0].id, FOLDER_ID, "the screen carries the Drive folder");
+  assert.equal(screens[0].context.title, undefined);
+  assert.equal(screens[0].context.content, undefined);
+  assert.equal(screens[0].context.docType, undefined);
 
   // Nothing of the creation path appears: no googleaction buttons, no
   // pendingGoogleAction, no Drive mutation.
@@ -332,22 +338,37 @@ test("normal account selection regression: without the smoke flag the staged fol
   const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
   const state = smokeState(workId, { unit: undefined, hat: undefined, actionName: undefined });
   const { calls } = installFake(t, (call) => {
-    if (call.url.includes("/drive/v3/files")) return json({ files: [{ id: FOLDER_ID, name: FOLDER_NAME }] });
+    if (call.url.includes("/drive/v3/files/root")) return json({ id: "root-id-abc123", name: "My Drive" });
+    if (call.url.includes("/drive/v3/files")) {
+      return json({ files: [{ id: FOLDER_ID, name: FOLDER_NAME, mimeType: "application/vnd.google-apps.folder" }] });
+    }
     return json({});
   });
 
-  const opaqueId = await stageOption(env, workId, { kind: "account", accountIdentifier: ACCOUNT, title: "My Doc", content: "Body text" });
+  const opaqueId = await stageOption(env, workId, {
+    kind: "account",
+    accountIdentifier: ACCOUNT,
+    title: "My Doc",
+    content: "Body text",
+    rows: [["Header"], ["Value"]],
+  });
   await handleGoogleAccountSelection(env, state, opaqueId);
 
-  // The whole folder list is staged as ONE folderlist option (Martin,
-  // 2026-11-18), not one per folder; the creation payload rides on it.
-  const folderOptions = stagedOptions(env, workId).filter((o: any) => o.kind === "folderlist");
-  assert.equal(folderOptions.length, 1);
-  assert.equal(folderOptions[0].smoke, undefined, "the normal path must never see the smoke discriminator");
-  assert.equal(folderOptions[0].title, "My Doc");
-  assert.equal(folderOptions[0].content, "Body text");
-  assert.equal(folderOptions[0].docType, "doc");
-  assert.ok(Array.isArray(folderOptions[0].folders) && folderOptions[0].folders.length >= 1, "the list carries the Drive folders");
+  // The whole listing is staged as ONE browse screen (Martin, 2026-11-18),
+  // not one record per folder; the creation payload rides on its context.
+  const screens = stagedOptions(env, workId).filter((o: any) => o.kind === "drivebrowse");
+  assert.equal(screens.length, 1);
+  const context = screens[0].context;
+  assert.equal(context.smoke, undefined, "the normal path must never see the smoke discriminator");
+  assert.equal(context.delivery, undefined, "the normal path must never see the delivery discriminator");
+  assert.equal(context.title, "My Doc");
+  assert.equal(context.content, "Body text");
+  assert.equal(context.docType, "doc");
+  assert.deepEqual(context.rows, [["Header"], ["Value"]], "rows ride along unchanged");
+  assert.equal(context.accountIdentifier, ACCOUNT);
+  assert.equal(context.kind, undefined, "the old option's kind is replaced by the screen structure");
+  assert.equal(context.folders, undefined, "the old option's folders are replaced by screen.items");
+  assert.ok(Array.isArray(screens[0].items) && screens[0].items.length >= 1, "the screen carries the Drive items");
   assert.equal(driveCreates(calls).length, 0);
 });
 
@@ -727,7 +748,10 @@ test("the generated smoke Work id keeps the required prefix with an exact bounde
 test("every callback_data shape the smoke flow can stage or emit -- account, folder, confirm, cancel, and the sessions switch row -- stays within Telegram's 64-byte limit", async (t: any) => {
   const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
   const { telegram } = installFake(t, (call) => {
-    if (call.url.includes("/drive/v3/files")) return json({ files: [{ id: FOLDER_ID, name: FOLDER_NAME }] });
+    if (call.url.includes("/drive/v3/files/root")) return json({ id: "root-id-abc123", name: "My Drive" });
+    if (call.url.includes("/drive/v3/files")) {
+      return json({ files: [{ id: FOLDER_ID, name: FOLDER_NAME, mimeType: "application/vnd.google-apps.folder" }] });
+    }
     return json({});
   });
 
@@ -743,8 +767,9 @@ test("every callback_data shape the smoke flow can stage or emit -- account, fol
   const workId = String(inits(env)[0][0]);
   capture("googleaccount");
 
-  // Stage 2 -- folder picker (shared handleGoogleAccountSelection, smoke
-  // branch): googlefolder:<workId>:<opaqueId>
+  // Stage 2 -- Drive browser screen (shared handleGoogleAccountSelection,
+  // smoke branch): googlefolder:<workId>:<screenId>:<code> -- one button per
+  // item plus the "✅ Save here" row.
   const state = smokeState(workId);
   const accountOptionId = await stageOption(env, workId, { kind: "account", smoke: true, accountIdentifier: ACCOUNT });
   await handleGoogleAccountSelection(env, state, accountOptionId);
@@ -752,13 +777,17 @@ test("every callback_data shape the smoke flow can stage or emit -- account, fol
 
   // Stage 3 -- confirmation (shared handleGoogleFolderSelection, smoke
   // branch): googlesmokeconfirm:<workId>:<opaqueId> + ...:<workId>:cancel.
-  // The list is staged as ONE folderlist option (Martin, 2026-11-18); the
-  // callback carries the list's opaque id plus the picked folder's POSITION,
-  // so the handler resolves the pick from the list rather than from a
-  // per-folder option.
-  const folderOptionKey = optionKeys(env, workId).find((k) => JSON.parse(store(env).get(k) as string).kind === "folderlist");
-  assert.ok(folderOptionKey, "the folder list option must have been staged");
-  const folderOptionId = String(folderOptionKey.split(":").pop());
+  // Account selection now stages a browse SCREEN, and tapping it is not
+  // handled on this branch, so the folderlist option that drives the
+  // confirmation is staged directly here -- exactly the record the shared
+  // handler consumes (the callback carries the list's opaque id plus the
+  // picked folder's POSITION).
+  const folderOptionId = await stageOption(env, workId, {
+    kind: "folderlist",
+    smoke: true,
+    accountIdentifier: ACCOUNT,
+    folders: [{ id: FOLDER_ID, name: FOLDER_NAME }],
+  });
   await handleGoogleFolderSelection(env, state, `${folderOptionId}:0`);
   capture("googlesmokeconfirm");
 
@@ -771,6 +800,16 @@ test("every callback_data shape the smoke flow can stage or emit -- account, fol
   // Every shape the smoke Work can reach is present...
   assert.ok(measured.some((m) => m.shape === "googleaccount" && m.data.startsWith(`googleaccount:${workId}:`)));
   assert.ok(measured.some((m) => m.shape === "googlefolder" && m.data.startsWith(`googlefolder:${workId}:`)));
+  // ...including the NEW browser buttons: an item's "open"/"file" code and
+  // the final "✅ Save here" ("s") row.
+  assert.ok(
+    measured.some((m) => m.shape === "googlefolder" && /:[of]\d+$/.test(m.data)),
+    "the browser's item buttons must be measured",
+  );
+  assert.ok(
+    measured.some((m) => m.shape === "googlefolder" && m.data.endsWith(":s")),
+    "the browser's Save here button must be measured",
+  );
   assert.ok(
     measured.some((m) => m.shape === "googlesmokeconfirm" && m.data.startsWith(`googlesmokeconfirm:${workId}:`) && !m.data.endsWith(":cancel")),
     "the confirm button must be staged",
@@ -889,12 +928,20 @@ test("an immediately delivered picker records the successful initiation exactly 
   assert.match(activities[0].activity ?? "", /authorized-account selection presented/);
 });
 
-test("50 Drive folders cost ONE storage write, and the first page shows 10 plus More folders (2026-11-18: one write per folder hit the subrequest limit)", async (t: any) => {
+test("50 items cost ONE storage write and all 50 are shown on one screen, with no 'More folders' button (2026-11-18: one write per folder hit the subrequest limit)", async (t: any) => {
   const workId = "8a1d4c2e-0000-4000-8000-000000000050";
   const env = fakeEnv({ ...googleAccountSeed(ACCOUNT) });
   const state = smokeState(workId, { unit: undefined, hat: undefined, actionName: undefined });
-  const files = Array.from({ length: 50 }, (_, i) => ({ id: `folder-${i}`, name: `Folder ${i}` }));
-  const { telegram } = installFake(t, (call) => (call.url.includes("/drive/v3/files") ? json({ files }) : json({})));
+  const files = Array.from({ length: 50 }, (_, i) => ({
+    id: `folder-${i}`,
+    name: `Folder ${i}`,
+    mimeType: "application/vnd.google-apps.folder",
+  }));
+  const { telegram } = installFake(t, (call) => {
+    if (call.url.includes("/drive/v3/files/root")) return json({ id: "root-id-abc123", name: "My Drive" });
+    if (call.url.includes("/drive/v3/files")) return json({ files });
+    return json({});
+  });
   const opaqueId = await stageOption(env, workId, { kind: "account", accountIdentifier: ACCOUNT, title: "Plan", content: "Body" });
   const store: Map<string, string> = (env as any).__store;
   const originalSet = store.set.bind(store);
@@ -904,8 +951,16 @@ test("50 Drive folders cost ONE storage write, and the first page shows 10 plus 
     return originalSet(k, v);
   };
   await handleGoogleAccountSelection(env, state, opaqueId);
-  assert.equal(optionWrites, 1, "the whole folder list is one staged option");
-  const folderButtons = callbackDatas(telegram).filter((d) => d.startsWith(`googlefolder:${workId}:`));
-  assert.ok(folderButtons.length <= 11, `at most 10 folders plus More folders on the first page, got ${folderButtons.length}`);
-  assert.ok(telegramTexts(telegram).includes("More folders") || JSON.stringify(telegram).includes("More folders"), "a More folders button is offered");
+  assert.equal(optionWrites, 1, "the whole browse screen is one staged option");
+  const datas = callbackDatas(telegram);
+  const itemButtons = datas.filter((d) => /^googlefolder:[^:]+:[a-f0-9]{8}:[of]\d+$/.test(d));
+  assert.equal(itemButtons.length, 50, `all 50 items must be on ONE screen, got ${itemButtons.length}`);
+  assert.ok(
+    datas.some((d) => /^googlefolder:[^:]+:[a-f0-9]{8}:s$/.test(d)),
+    "the Save here button is offered",
+  );
+  assert.ok(
+    !telegramTexts(telegram).includes("More folders") && !JSON.stringify(telegram).includes("More folders"),
+    "no More folders button any more -- everything fits one screen",
+  );
 });
