@@ -1889,6 +1889,14 @@ async function renderBrowseScreen(
     await sendWorkspaceHatMessage(env, target, "⚠️ Could not build the Drive browser buttons.");
     return state;
   }
+  if (screen.parentScreenId !== undefined) {
+    const backData = buildBrowseCallback(state.workId, screenId, { type: "back" });
+    if (backData === null) {
+      await sendWorkspaceHatMessage(env, target, "⚠️ Could not build the Drive browser buttons.");
+      return state;
+    }
+    buttons.push([{ text: "⬅️ Back", callback_data: backData }]);
+  }
   buttons.push([{ text: "✅ Save here", callback_data: saveData }]);
 
   // The three header variants are renderFolderPage's, word for word; only
@@ -2226,8 +2234,9 @@ export async function handleGoogleFolderSelection(
 }
 
 /** Handle a Drive browser tap on a folder or button.
- *  - "file", "save", "back": show unavailable message
+ *  - "file", "save": show unavailable message
  *  - "open": open the selected folder as a new browse screen
+ *  - "back": re-show the parent screen (no Drive call, no new write)
  */
 export async function handleDriveBrowseTap(
   env: Env,
@@ -2242,9 +2251,27 @@ export async function handleDriveBrowseTap(
   };
   const { type } = tap.action;
 
-  if (type === "file" || type === "save" || type === "back") {
+  if (type === "file" || type === "save") {
     await sendWorkspaceHatMessage(env, target, "⚠️ That button isn't available yet.");
     return state;
+  }
+
+  if (type === "back") {
+    const screen = await readBrowseScreen(env, state.workId, tap.screenId);
+    if (!screen) {
+      await sendWorkspaceHatMessage(env, target, "⚠️ That folder view has expired. Please start the save again.");
+      return state;
+    }
+    if (screen.parentScreenId === undefined) {
+      await sendWorkspaceHatMessage(env, target, "⚠️ You're already at the top folder.");
+      return state;
+    }
+    const parent = await readBrowseScreen(env, state.workId, screen.parentScreenId);
+    if (!parent) {
+      await sendWorkspaceHatMessage(env, target, "⚠️ That folder view has expired. Please start the save again.");
+      return state;
+    }
+    return renderBrowseScreen(env, state, target, screen.parentScreenId, parent, { logPresented: false });
   }
 
   if (type === "open") {

@@ -37,7 +37,7 @@ import {
 } from "./googleOAuth";
 import { buildProposalDocLayout } from "./proposalRedline";
 import { parseCallbackData } from "./telegramCallbackData";
-import { parseBrowseValue } from "./googleDriveBrowseScreen";
+import { buildBrowseCallback, parseBrowseValue } from "./googleDriveBrowseScreen";
 import type { WorkState } from "./types";
 
 function createMockKv() {
@@ -2656,11 +2656,15 @@ test("Task 7: file, save and back taps report unavailability with zero Drive cal
     const beforeDrive = counters.driveUrls.length;
     const writes = countOptionWrites(mockKv, workId);
 
-    for (const code of ["f1", "s", "b"]) {
-      await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:${code}`);
-      const last = drive.texts[drive.texts.length - 1]!;
-      assert.ok(last.includes("isn't available yet"), `tap ${code}: expected 'isn\\'t available yet', got: ${last}`);
-    }
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:f1`);
+    assert.ok(drive.texts[drive.texts.length - 1]!.includes("isn't available yet"), "file tap: expected 'isn't available yet'");
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:s`);
+    assert.ok(drive.texts[drive.texts.length - 1]!.includes("isn't available yet"), "save tap: expected 'isn't available yet'");
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:b`);
+    assert.ok(
+      drive.texts[drive.texts.length - 1]!.includes("You're already at the top folder."),
+      `back on top screen: expected 'You\\'re already at the top folder.', got: ${drive.texts[drive.texts.length - 1]}`,
+    );
 
     assert.strictEqual(counters.driveUrls.length, beforeDrive, "ZERO Drive calls for file/save/back taps");
     assert.strictEqual(writes(), 0, "ZERO storage writes for file/save/back taps");
@@ -2794,6 +2798,447 @@ test("Task 7: two levels deep -- the second opened screen's parentScreenId is th
     const second = storedScreen(mockKv, workId, secondScreenId);
     assert.strictEqual(second.parentScreenId, firstScreenId, "level 2's parent is the first opened screen");
     assert.strictEqual(second.folderId, folderId);
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Drive file browser (Task 8, Stage 1-2): the Back button.
+// ---------------------------------------------------------------------------
+
+/** Returns the index of the "⬅️ Back" row within a picker, or -1 when absent. */
+const backRowOf = (picker: any[][]): number =>
+  picker.findIndex((r) => r[0]?.text === "⬅️ Back");
+
+/** Finds the picker row whose button shows `text` (e.g. "📁 C folder"). */
+const rowWithText = (picker: any[][], text: string): any[] =>
+  picker.find((r) => r[0]?.text === text)!;
+
+test("Task 8: an opened folder screen has a Back row directly above Save here (Save last); the top screen has no Back button", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t8-a";
+  const folderId = "folder-a";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: folderId, name: "A folder", mimeType: "application/vnd.google-apps.folder" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    // Top screen: the folder item row, then Save here; no Back button.
+    const topPicker = drive.pickers[0]!;
+    assert.strictEqual(topPicker.length, 2, "top screen: folder item + Save here");
+    assert.strictEqual(topPicker[0][0].text, "📁 A folder");
+    assert.strictEqual(topPicker[1][0].text, "✅ Save here", "Save here is the last row on the top screen");
+    assert.strictEqual(backRowOf(topPicker), -1, "no Back button on the top screen");
+
+    // Open the folder.
+    const value = parseCallbackData(String(topPicker[0][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), value);
+
+    // Opened screen: item row, then Back, then Save here (last).
+    const opened = drive.pickers[1]!;
+    assert.strictEqual(opened.length, 3, "opened screen: item, Back, Save here");
+    assert.strictEqual(opened[0][0].text, "📁 A folder");
+    const backIdx = backRowOf(opened);
+    assert.strictEqual(backIdx, 1, "Back row directly above Save here");
+    assert.strictEqual(opened[backIdx][0].text, "⬅️ Back");
+    assert.strictEqual(opened[opened.length - 1][0].text, "✅ Save here", "Save here is the last row");
+    const backScreenId = screenIdOf(opened[backIdx]);
+    const childScreenId = screenIdOf(opened[0]);
+    assert.strictEqual(backScreenId, childScreenId, "the Back button carries the opened screen's id");
+    const child = storedScreen(mockKv, workId, childScreenId);
+    assert.strictEqual(child.parentScreenId, screenIdOf(topPicker[0]), "child records the top screen as parent");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 8: Back from one level down re-shows My Drive with the top screen's own id, zero Drive/notion/storage activity", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t8-b";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: "folder-b", name: "B folder", mimeType: "application/vnd.google-apps.folder" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const topScreenId = screenIdOf(drive.pickers[0]![0]);
+
+    // Open a folder.
+    const openValue = parseCallbackData(String(drive.pickers[0]![0][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), openValue);
+
+    // Baselines captured right before the Back tap (top screen + opened screen already exist).
+    const beforeNotion = counters.notion;
+    const beforeListing = counters.driveUrls.length;
+    const writes = countOptionWrites(mockKv, workId);
+    const beforeKeys = stagedOptionKeys(mockKv, workId);
+
+    // Back from the opened screen (Back row, not the folder item row).
+    const openedPicker = drive.pickers[1]!;
+    const backValue = parseCallbackData(String(openedPicker[backRowOf(openedPicker)][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), backValue);
+
+    // The re-shown screen names My Drive.
+    const reshownText = drive.texts[drive.texts.length - 1]!;
+    assert.ok(reshownText.includes("📂 *My Drive*"), `expected My Drive, got: ${reshownText}`);
+
+    // The new picker carries the TOP screen's own id.
+    const reshownPicker = drive.pickers[drive.pickers.length - 1]!;
+    assert.strictEqual(screenIdOf(reshownPicker[0]), topScreenId, "re-shown screen uses the top screen's id");
+    assert.strictEqual(backRowOf(reshownPicker), -1, "top screen shows only Save here (no Back)");
+
+    // Zero Drive, notion, and storage activity during the Back tap.
+    assert.strictEqual(counters.notion, beforeNotion, "zero api.notion.com requests during Back");
+    assert.strictEqual(counters.driveUrls.length, beforeListing, "zero Drive calls during Back");
+    assert.strictEqual(writes(), 0, "zero storage writes during Back");
+    assert.deepStrictEqual(stagedOptionKeys(mockKv, workId), beforeKeys, "no new screen stored by Back");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 8: two levels down, then Back twice -> level-1 folder, then My Drive", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t8-c";
+  const folderId = "folder-c";
+  const childId = "folder-child-c";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [
+          { id: folderId, name: "C folder", mimeType: "application/vnd.google-apps.folder" },
+          { id: childId, name: "C child", mimeType: "application/vnd.google-apps.folder" },
+        ],
+      },
+    },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const topScreenId = screenIdOf(drive.pickers[0]![0]);
+
+    // Level 1: open C folder.
+    const v1 = parseCallbackData(String(rowWithText(drive.pickers[0]!, "📁 C folder")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), v1);
+    const level1ScreenId = screenIdOf(drive.pickers[1]![0]);
+    const level1 = storedScreen(mockKv, workId, level1ScreenId);
+    assert.strictEqual(level1.folderId, folderId);
+    assert.strictEqual(level1.parentScreenId, topScreenId);
+
+    // Level 2: open C child (on the level-1 picker).
+    const l1Picker = drive.pickers[1]!;
+    const childValue = parseCallbackData(String(rowWithText(l1Picker, "📁 C child")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), childValue);
+    const level2ScreenId = screenIdOf(drive.pickers[2]![0]);
+    const level2 = storedScreen(mockKv, workId, level2ScreenId);
+    assert.strictEqual(level2.folderId, childId);
+    assert.strictEqual(level2.parentScreenId, level1ScreenId);
+
+    // First Back -> level-1 folder.
+    const l2Picker = drive.pickers[2]!;
+    const back1 = parseCallbackData(String(l2Picker[backRowOf(l2Picker)][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), back1);
+    const text1 = drive.texts[drive.texts.length - 1]!;
+    assert.ok(text1.includes("📂 *C folder*"), `first Back should show C folder, got: ${text1}`);
+
+    // Second Back -> My Drive.
+    const l1Again = drive.pickers[drive.pickers.length - 1]!;
+    const back2 = parseCallbackData(String(l1Again[backRowOf(l1Again)][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), back2);
+    const text2 = drive.texts[drive.texts.length - 1]!;
+    assert.ok(text2.includes("📂 *My Drive*"), `second Back should show My Drive, got: ${text2}`);
+    assert.strictEqual(screenIdOf(drive.pickers[drive.pickers.length - 1]![0]), topScreenId, "final re-shown screen is the top screen");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 8: Back when the parent screen has expired -> has expired, zero Drive calls", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t8-d";
+  const folderId = "folder-d";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: folderId, name: "D folder", mimeType: "application/vnd.google-apps.folder" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const topScreenId = screenIdOf(drive.pickers[0]![0]);
+    const openValue = parseCallbackData(String(drive.pickers[0]![0][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), openValue);
+    const beforeListing = counters.driveUrls.length;
+
+    // Expire the parent (top) screen.
+    mockKv._rawStore.delete(`google_option:${workId}:${topScreenId}`);
+
+    // Back from the opened screen (Back row).
+    const openedPicker = drive.pickers[1]!;
+    const backValue = parseCallbackData(String(openedPicker[backRowOf(openedPicker)][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), backValue);
+
+    const last = drive.texts[drive.texts.length - 1]!;
+    assert.ok(last.includes("has expired"), `expected 'has expired', got: ${last}`);
+    assert.strictEqual(counters.driveUrls.length, beforeListing, "ZERO Drive calls when parent expired");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 8: Back when the tapped screen has expired -> has expired", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t8-e";
+  const folderId = "folder-e";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: folderId, name: "E folder", mimeType: "application/vnd.google-apps.folder" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const openValue = parseCallbackData(String(drive.pickers[0]![0][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), openValue);
+    const openedScreenId = screenIdOf(drive.pickers[1]![0]);
+    const beforeListing = counters.driveUrls.length;
+
+    // Expire the tapped (opened) screen.
+    mockKv._rawStore.delete(`google_option:${workId}:${openedScreenId}`);
+
+    const backValue = `${openedScreenId}:b`;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), backValue);
+
+    const last = drive.texts[drive.texts.length - 1]!;
+    assert.ok(last.includes("has expired"), `expected 'has expired', got: ${last}`);
+    assert.strictEqual(counters.driveUrls.length, beforeListing, "ZERO Drive calls when tapped screen expired");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 8: Back on a screen with no parent -> You're already at the top folder, zero Drive/storage", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t8-f";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({ listing: { body: { files: [] } } });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const topScreenId = screenIdOf(drive.pickers[0]![0]);
+    const beforeListing = counters.driveUrls.length;
+    const writes = countOptionWrites(mockKv, workId);
+
+    const fullData = buildBrowseCallback(workId, topScreenId, { type: "back" });
+    assert.ok(fullData, "top-screen back callback builds within the byte limit");
+    const { value } = parseCallbackData(fullData!);
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), value);
+
+    const last = drive.texts[drive.texts.length - 1]!;
+    assert.ok(last.includes("You're already at the top folder."), `expected top-folder message, got: ${last}`);
+    assert.strictEqual(counters.driveUrls.length, beforeListing, "ZERO Drive calls");
+    assert.strictEqual(writes(), 0, "ZERO storage writes");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 8: after Back, tapping a folder on the re-shown screen still opens it (one listing call, new screen stored)", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t8-g";
+  const folderId = "folder-g";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: folderId, name: "G folder", mimeType: "application/vnd.google-apps.folder" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const topScreenId = screenIdOf(drive.pickers[0]![0]);
+    const openValue = parseCallbackData(String(drive.pickers[0]![0][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), openValue);
+    const backValue = parseCallbackData(String(drive.pickers[1]![backRowOf(drive.pickers[1]!)][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), backValue);
+    const baseScreens = stagedOptionKeys(mockKv, workId).length;
+    const listingBeforeReopen = counters.listing; // top-screen listing + the open listing above
+
+    // Tap a folder on the re-shown top screen.
+    const reshownPicker = drive.pickers[drive.pickers.length - 1]!;
+    const folderValue = parseCallbackData(String(reshownPicker[0][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), folderValue);
+
+    const openedText = drive.texts[drive.texts.length - 1]!;
+    assert.ok(openedText.includes("📂 *G folder*"), `re-opened folder not shown, got: ${openedText}`);
+    const newScreenId = screenIdOf(drive.pickers[drive.pickers.length - 1]![0]);
+    const opened = storedScreen(mockKv, workId, newScreenId);
+    assert.strictEqual(opened.folderId, folderId);
+    assert.strictEqual(opened.parentScreenId, topScreenId, "re-opened screen's parent is the re-shown top screen");
+    assert.strictEqual(counters.listing, listingBeforeReopen + 1, "exactly one listing call when re-opening after Back");
+    assert.strictEqual(stagedOptionKeys(mockKv, workId).length, baseScreens + 1, "a new screen was stored");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 8: smoke flow -> after Back, the smoke safety line (disposable) is still in the message", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t8-h";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { smoke: true });
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: "folder-h", name: "H folder", mimeType: "application/vnd.google-apps.folder" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const openValue = parseCallbackData(String(drive.pickers[0]![0][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), openValue);
+
+    const backValue = parseCallbackData(String(drive.pickers[1]![0][0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), backValue);
+
+    const last = drive.texts[drive.texts.length - 1]!;
+    assert.ok(last.includes("disposable"), `smoke safety line missing after Back, got: ${last}`);
+    assert.ok(last.includes("never the production proposal folder"), `smoke folder warning missing after Back, got: ${last}`);
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 8: file and save taps still answer isn't available yet", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t8-i";
+  const folderId = "folder-i";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [
+          { id: folderId, name: "I folder", mimeType: "application/vnd.google-apps.folder" },
+          { id: "file-i", name: "notes.txt", mimeType: "text/plain" },
+        ],
+      },
+    },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const openValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, "📁 I folder")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), openValue);
+
+    const beforeListing = counters.driveUrls.length;
+    const writes = countOptionWrites(mockKv, workId);
+
+    // File tap on the opened screen.
+    const fileValue = parseCallbackData(String(rowWithText(drive.pickers[1]!, "📄 notes.txt")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), fileValue);
+    assert.ok(drive.texts[drive.texts.length - 1]!.includes("isn't available yet"), "file tap: expected isn't available yet");
+
+    // Save tap on the opened screen.
+    const saveValue = `${screenIdOf(drive.pickers[1]![0])}:s`;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), saveValue);
+    assert.ok(drive.texts[drive.texts.length - 1]!.includes("isn't available yet"), "save tap: expected isn't available yet");
+
+    assert.strictEqual(counters.driveUrls.length, beforeListing, "ZERO Drive calls for file/save taps");
+    assert.strictEqual(writes(), 0, "ZERO storage writes for file/save taps");
   } finally {
     globalThis.fetch = realFetch;
     drive.restore();
