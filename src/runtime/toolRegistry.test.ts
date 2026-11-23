@@ -359,14 +359,14 @@ test("J. an incompatible effect classification is denied: a read Action cannot c
   await expectDenied(env, readContext, /declared "read" and cannot carry effect "external_mutation"/, t);
 });
 
-test("K. the shared output-delivery save is allowed for an undeclared Action, but any OTHER operation is still denied (undeclared Action-to-Tool combination)", async (t) => {
+test("K. the shared output-delivery save (create, and since 2026-11-23 replace) is allowed for an undeclared Action, but any OTHER operation is still denied (undeclared Action-to-Tool combination)", async (t) => {
   const { kv } = kvWithGoogleAccounts();
   const env = fakeEnv({}, kv);
   const { calls } = installGoogleFake(t, docServer());
   // new_enquiry is a write Action that declares NO Tool operations. Under the
-  // shared output-delivery exemption (Martin, 2026-11-17) the one named
-  // google_docs.create_and_verify operation is allowed for ANY Work's own
-  // output -- so it now reaches Google instead of being denied.
+  // shared output-delivery exemption (Martin, 2026-11-17; extended 2026-11-23)
+  // the two named google_docs operations are allowed for ANY Work's own
+  // output -- so they now reach Google instead of being denied.
   // Without Martin's tap (no proof) the shared save is refused, before any request.
   const noProof = await invokeTool(
     env,
@@ -386,20 +386,51 @@ test("K. the shared output-delivery save is allowed for an undeclared Action, bu
   );
   assert.equal(outcome.state, "succeeded", `the shared save is allowed for an undeclared Action with Martin's tap: ${outcome.reason}`);
 
-  // The exemption is ONE operation: a different operation is still denied for
-  // the same undeclared Action, before any request.
-  const otherContext = workSessionContext(toolState({ actionName: "new_enquiry" }));
-  const other = await invokeTool(
+  // The exemption is now TWO operations (Martin's decision, 2026-11-23):
+  // create_and_verify and update_and_verify are both allowed for ANY Work's
+  // own output, but each still requires Martin's bound tap. A different
+  // operation is still denied unless declared.
+
+  // a) update_and_verify is in the exemption but still needs Martin's bound tap.
+  const updateNoProof = await invokeTool(
     env,
     {
       tool_id: GOOGLE_DOCS_TOOL_ID,
-      operation_id: "google_docs.update_and_verify",
+      operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID,
       input: { document_id: "doc-1", account_identifier: "martin@example.com", document_specification: { text: "v1" } },
     },
-    otherContext,
+    workSessionContext(toolState({ actionName: "new_enquiry" })),
   );
-  assert.equal(other.state, "denied");
-  assert.match(other.reason ?? "", /does not declare Tool operation google_docs\.update_and_verify/);
+  assert.equal(updateNoProof.state, "denied", "update_and_verify always needs Martin's tap");
+  assert.match(updateNoProof.reason ?? "", /no ApprovalProof was supplied/);
+
+  const updateWrongDocProof = mintExternalToolApprovalProof(
+    toolState({ actionName: "new_enquiry" }),
+    { toolId: GOOGLE_DOCS_TOOL_ID, operationId: GOOGLE_DOCS_UPDATE_OPERATION_ID, targetResourceId: "gdrive:document:doc-2" },
+  );
+  const updateWrongDoc = await invokeTool(
+    env,
+    {
+      tool_id: GOOGLE_DOCS_TOOL_ID,
+      operation_id: GOOGLE_DOCS_UPDATE_OPERATION_ID,
+      input: { document_id: "doc-1", account_identifier: "martin@example.com", document_specification: { text: "v1" } },
+    },
+    workSessionContext(toolState({ actionName: "new_enquiry" }), updateWrongDocProof),
+  );
+  assert.equal(updateWrongDoc.state, "denied", "a proof bound to doc-2 cannot authorize doc-1");
+
+  // b) Any OTHER operation is still refused unless declared.
+  const formatCall = await invokeTool(
+    env,
+    {
+      tool_id: GOOGLE_DOCS_TOOL_ID,
+      operation_id: GOOGLE_DOCS_FORMAT_OPERATION_ID,
+      input: { document_id: "doc-1", account_identifier: "martin@example.com", document_specification: { text: "v1" } },
+    },
+    workSessionContext(toolState({ actionName: "new_enquiry" })),
+  );
+  assert.equal(formatCall.state, "denied");
+  assert.match(formatCall.reason ?? "", /does not declare Tool operation google_docs\.format_and_verify/);
   // No Drive mutation beyond the shared create's own create+insert+verify
   // sequence: the denied update never issued a PATCH (the update method).
   assert.equal(calls.some((c) => c.method === "PATCH"), false, "the denied update must not issue any request");

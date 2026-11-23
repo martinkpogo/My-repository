@@ -209,7 +209,7 @@ export const EXTERNAL_TOOL_TARGET = "external:tool";
  * Action. This is the only exemption from the per-Action declaration rule
  * (step 5 of evaluateExternalMutationAccess), and it is deliberately narrow:
  *
- *  - it is a single, named operation -- not a class, not a prefix, never
+ *  - it is two named operations -- not a class, not a prefix, never
  *    "any Tool". A different operation is still refused unless declared;
  *  - every OTHER safeguard is unchanged: the context must be a work_session,
  *    the Action's consequence must be "write", and a bound ApprovalProof is
@@ -223,6 +223,16 @@ export const EXTERNAL_TOOL_TARGET = "external:tool";
  * -- the same "one shared install point" reasoning as the Research Runtime.
  */
 export const SHARED_OUTPUT_DELIVERY_OPERATION_ID = "google_docs.create_and_verify";
+
+/**
+ * The shared save's second operation (Martin's decision, 2026-11-23):
+ * overwrite an EXISTING Google Doc with the Work's own approved output.
+ * Same exemption, same safeguards: work_session context, "write"
+ * consequence, and a bound ApprovalProof minted from Martin's final
+ * "Yes, replace" tap and bound to that exact document
+ * (gdrive:document:<id>).
+ */
+export const SHARED_OUTPUT_REPLACE_OPERATION_ID = "google_docs.update_and_verify";
 
 export class AccessDeniedError extends Error {
   readonly reason: string;
@@ -770,7 +780,8 @@ export function evaluateExternalMutationAccess(env: Env, request: ExternalMutati
   // other safeguard above and below still applies (work_session context,
   // write consequence, bound ApprovalProof to the picked folder).
   const sharedOutputDelivery =
-    request.toolId === "google_docs" && request.operationId === SHARED_OUTPUT_DELIVERY_OPERATION_ID;
+    request.toolId === "google_docs" &&
+    (request.operationId === SHARED_OUTPUT_DELIVERY_OPERATION_ID || request.operationId === SHARED_OUTPUT_REPLACE_OPERATION_ID);
   if (!declared && !sharedOutputDelivery) {
     throw new AccessDeniedError(
       `action "${resolved.action.name}" does not declare Tool operation ${request.operationId} -- a Tool operation is permitted only when the Work's own resolved Action declares it, and availability of the Tool grants nothing.`,
