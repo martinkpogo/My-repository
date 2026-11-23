@@ -3,6 +3,7 @@ import { afterEach, test } from "node:test";
 
 import type { Env, WorkState } from "./types";
 import { handleGoogleAccountSelection, handleGoogleActionApproval, handleGoogleFolderSelection, saveOpaqueOption } from "./googleOAuth";
+import { saveBrowseScreen } from "./googleDriveBrowseScreen";
 import { getActiveWorkId } from "./sessionRouting";
 import { confirmGoogleDocsSmoke, startGoogleDocsSmokeFlow, type GoogleDocsSmokeConfirmSeams } from "./googleDocsSmokeFlow";
 import { GOOGLE_DOCS_SMOKE_WORK_ID_PREFIX } from "./runtime/tools/googleDocsSmoke";
@@ -382,17 +383,19 @@ test("smoke folder selection records the pending selection and stages only the e
   const state = smokeState(workId);
   const { calls, telegram } = installFake(t, () => json({}));
 
-  // The list is staged as ONE folderlist option (Martin, 2026-11-18); the
-  // callback carries the list's opaque id plus the picked folder's POSITION,
-  // so the handler resolves the pick from the list rather than from a
-  // per-folder option.
-  const listOpaqueId = await stageOption(env, workId, {
-    kind: "folderlist",
-    smoke: true,
-    accountIdentifier: ACCOUNT,
-    folders: [{ id: FOLDER_ID, name: FOLDER_NAME }],
+  // Stage a browse screen whose context carries the same flow fields the
+  // old folderlist option carried (without kind and folders), then tap Save.
+  const saved = await saveBrowseScreen(env, workId, {
+    kind: "drivebrowse",
+    folderId: FOLDER_ID,
+    folderName: FOLDER_NAME,
+    items: [],
+    truncated: false,
+    context: { smoke: true, accountIdentifier: ACCOUNT },
   });
-  const next = await handleGoogleFolderSelection(env, state, `${listOpaqueId}:0`);
+  assert.strictEqual(saved.ok, true);
+  const screenId = saved.screenId;
+  const next = await handleGoogleFolderSelection(env, state, `${screenId}:s`);
 
   // The discriminator is now ALSO in Work state, bound to this target.
   assert.deepEqual(
@@ -429,19 +432,19 @@ test("normal folder selection regression: without the smoke flag the approval pa
   const state = smokeState(workId, { unit: undefined, hat: undefined, actionName: undefined });
   const { calls, telegram } = installFake(t, () => json({}));
 
-  // The list is staged as ONE folderlist option (Martin, 2026-11-18); the
-  // callback carries the list's opaque id plus the picked folder's POSITION,
-  // so the handler resolves the pick from the list rather than from a
-  // per-folder option.
-  const listOpaqueId = await stageOption(env, workId, {
-    kind: "folderlist",
-    docType: "doc",
-    accountIdentifier: ACCOUNT,
-    title: "My Doc",
-    content: "Body",
-    folders: [{ id: FOLDER_ID, name: FOLDER_NAME }],
+  // Stage a browse screen whose context carries the same flow fields the
+  // old folderlist option carried (without kind and folders), then tap Save.
+  const saved = await saveBrowseScreen(env, workId, {
+    kind: "drivebrowse",
+    folderId: FOLDER_ID,
+    folderName: FOLDER_NAME,
+    items: [],
+    truncated: false,
+    context: { docType: "doc", accountIdentifier: ACCOUNT, title: "My Doc", content: "Body" },
   });
-  const next = await handleGoogleFolderSelection(env, state, `${listOpaqueId}:0`);
+  assert.strictEqual(saved.ok, true);
+  const screenId = saved.screenId;
+  const next = await handleGoogleFolderSelection(env, state, `${screenId}:s`);
 
   assert.equal(next.pendingSmokeSelection, undefined, "the normal path must never touch the smoke state");
   assert.equal(next.pendingGoogleAction?.type, "create_doc");
@@ -782,13 +785,20 @@ test("every callback_data shape the smoke flow can stage or emit -- account, fol
   // confirmation is staged directly here -- exactly the record the shared
   // handler consumes (the callback carries the list's opaque id plus the
   // picked folder's POSITION).
-  const folderOptionId = await stageOption(env, workId, {
-    kind: "folderlist",
-    smoke: true,
-    accountIdentifier: ACCOUNT,
-    folders: [{ id: FOLDER_ID, name: FOLDER_NAME }],
+  // Stage a smoke browse screen whose context carries the same flow fields
+  // the old folderlist option carried (without kind and folders), then tap
+  // Save. That reaches the smoke confirmation branch of the shared handler.
+  const saved = await saveBrowseScreen(env, workId, {
+    kind: "drivebrowse",
+    folderId: FOLDER_ID,
+    folderName: FOLDER_NAME,
+    items: [],
+    truncated: false,
+    context: { smoke: true, accountIdentifier: ACCOUNT },
   });
-  await handleGoogleFolderSelection(env, state, `${folderOptionId}:0`);
+  assert.strictEqual(saved.ok, true);
+  const screenId = saved.screenId;
+  await handleGoogleFolderSelection(env, state, `${screenId}:s`);
   capture("googlesmokeconfirm");
 
   // Stage 4 -- the /sessions row for this still-open smoke Work, built in

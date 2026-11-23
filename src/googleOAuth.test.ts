@@ -37,7 +37,7 @@ import {
 } from "./googleOAuth";
 import { buildProposalDocLayout } from "./proposalRedline";
 import { parseCallbackData } from "./telegramCallbackData";
-import { buildBrowseCallback, parseBrowseValue } from "./googleDriveBrowseScreen";
+import { buildBrowseCallback, parseBrowseValue, saveBrowseScreen } from "./googleDriveBrowseScreen";
 import type { WorkState } from "./types";
 
 function createMockKv() {
@@ -353,18 +353,18 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
   const originalFetch = globalThis.fetch;
 
   const workId = "work-proposal-200";
-  // The list is staged as ONE folderlist option (Martin, 2026-11-18); the
-  // callback carries the list's opaque id plus the picked folder's POSITION,
-  // so the handler resolves the pick from the list rather than from a
-  // per-folder option.
-  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
-    kind: "folderlist",
-    docType: "doc",
-    accountIdentifier: "selected@enig.com",
-    title: "Brand Guidelines",
-    content: "Guidelines for ENIG brand assets.",
-    folders: [{ id: "folder-999", name: "Brand Assets" }],
+  // Stage a browser screen whose context carries the same flow fields the
+  // old folderlist option carried (without kind and folders), then tap Save.
+  const saved = await saveBrowseScreen(fakeEnv, workId, {
+    kind: "drivebrowse",
+    folderId: "folder-999",
+    folderName: "Brand Assets",
+    items: [],
+    truncated: false,
+    context: { docType: "doc", accountIdentifier: "selected@enig.com", title: "Brand Guidelines", content: "Guidelines for ENIG brand assets." },
   });
+  assert.strictEqual(saved.ok, true);
+  const screenId = saved.screenId;
 
   const state: WorkState = {
     workId,
@@ -388,9 +388,9 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
   }) as typeof fetch;
 
   try {
-    // index.ts splits callback_data as action:workId:value, so the handler
-    // receives "<listOpaqueId>:0" -- the list id followed by the position.
-    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
+    // Tapping Save on the staged browse screen reaches the same flow the
+    // old folderlist option used to reach.
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${screenId}:s`);
 
     assert.ok(updatedState.pendingGoogleAction);
     assert.strictEqual(updatedState.pendingGoogleAction.title, "Brand Guidelines");
@@ -405,6 +405,112 @@ test("Folder selection sets pending action and emits proposal with approve/rejec
     assert.ok(updatedState.pendingActionSummary, "must also set the generic pendingActionSummary for /sessions recovery");
     assert.strictEqual(updatedState.pendingActionSummary?.label, "Create Google Doc: Brand Guidelines");
     assert.deepStrictEqual(updatedState.pendingActionSummary?.buttons, sentButtons);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Task 14: an old-style value 'ab12cd34:3' -> 'no longer current', ZERO Drive calls, ZERO storage writes", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+  const workId = "work-t14-a";
+  const state: WorkState = { workId, chatId: 1, stage: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  let driveCalls = 0;
+  let sentText = "";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const s = String(url);
+    if (s.includes("api.telegram.org")) {
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      sentText = body?.text ?? "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    if (s.includes("googleapis.com/drive/v3/files")) driveCalls++;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const writes = countOptionWrites(mockKv, workId);
+
+  try {
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, "ab12cd34:3");
+    assert.strictEqual(updatedState, state, "state is unchanged");
+    assert.ok(sentText.includes("no longer current"), `expected 'no longer current', got: ${sentText}`);
+    assert.strictEqual(driveCalls, 0, "ZERO Drive calls");
+    assert.strictEqual(writes(), 0, "ZERO storage writes");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Task 14: an old-style 'ab12cd34:more' -> 'no longer current', ZERO Drive calls", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+  const workId = "work-t14-b";
+  const state: WorkState = { workId, chatId: 1, stage: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  let driveCalls = 0;
+  let sentText = "";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const s = String(url);
+    if (s.includes("api.telegram.org")) {
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      sentText = body?.text ?? "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    if (s.includes("googleapis.com/drive/v3/files")) driveCalls++;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const writes = countOptionWrites(mockKv, workId);
+
+  try {
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, "ab12cd34:more");
+    assert.strictEqual(updatedState, state, "state is unchanged");
+    assert.ok(sentText.includes("no longer current"), `expected 'no longer current', got: ${sentText}`);
+    assert.strictEqual(driveCalls, 0, "ZERO Drive calls");
+    assert.strictEqual(writes(), 0, "ZERO storage writes");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Task 14: a staged 'folderlist' option + a tap '<itsId>:0' -> 'no longer current'; option not used, pendingGoogleAction unset", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+  const workId = "work-t14-c";
+  const state: WorkState = { workId, chatId: 1, stage: "active", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  let driveCalls = 0;
+  let sentText = "";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const s = String(url);
+    if (s.includes("api.telegram.org")) {
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      sentText = body?.text ?? "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    if (s.includes("googleapis.com/drive/v3/files")) driveCalls++;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  // Stage an old-style folderlist option directly (the dead path's input).
+  const listOpaqueId = await saveOpaqueOption(fakeEnv, workId, {
+    kind: "folderlist",
+    docType: "doc",
+    accountIdentifier: "user@enig.com",
+    title: "Old Picker",
+    content: "Body",
+    folders: [{ id: "folder-old", name: "Old Folder" }],
+  });
+  const writes = countOptionWrites(mockKv, workId);
+
+  try {
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, `${listOpaqueId}:0`);
+    assert.strictEqual(updatedState, state, "state is unchanged");
+    assert.ok(sentText.includes("no longer current"), `expected 'no longer current', got: ${sentText}`);
+    assert.strictEqual(updatedState.pendingGoogleAction, undefined, "pendingGoogleAction stays unset");
+    assert.strictEqual(driveCalls, 0, "ZERO Drive calls");
+    assert.strictEqual(writes(), 0, "ZERO storage writes");
+    // The folderlist option is NOT consumed/used by the dead path.
+    assert.strictEqual(mockKv._rawStore.get(`google_option:${workId}:${listOpaqueId}`) !== undefined, true, "folderlist option still present");
   } finally {
     globalThis.fetch = originalFetch;
   }
