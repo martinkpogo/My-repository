@@ -2175,7 +2175,76 @@ export async function handleDriveBrowseTap(
   const { type } = tap.action;
 
   if (type === "replace") {
-    await sendWorkspaceHatMessage(env, target, "⚠️ That button isn't available yet.");
+    // 1. Read the stored browse screen; nothing may be consumed or changed yet.
+    const screen = await readBrowseScreen(env, state.workId, tap.screenId);
+    if (!screen) {
+      await sendWorkspaceHatMessage(env, target, "⚠️ That folder view has expired. Please start the save again.");
+      return state;
+    }
+    // 2. The tapped item must exist and be a file.
+    const index = tap.action.index;
+    const item = screen.items[index];
+    if (!item || item.kind !== "file") {
+      await sendWorkspaceHatMessage(env, target, "⚠️ That file is no longer available.");
+      return state;
+    }
+    // 3. Replace is offered for Google Docs only.
+    if (item.mimeType !== "application/vnd.google-apps.document") {
+      await sendWorkspaceHatMessage(env, target, "⚠️ Only Google Docs can be replaced.");
+      return state;
+    }
+    // 4. Only the "Save approved output to Drive" flow may offer Replace.
+    if (screen.context.delivery !== true) {
+      await sendWorkspaceHatMessage(env, target, "⚠️ Replacing a file is only available when saving an approved output.");
+      return state;
+    }
+    // 5. The account identifier must be on the screen context.
+    const account = screen.context.accountIdentifier;
+    if (typeof account !== "string") {
+      await sendWorkspaceHatMessage(env, target, "⚠️ That folder view has expired. Please start the save again.");
+      return state;
+    }
+    // 6. Stage the confirmation option (one storage write; failure is explicit).
+    let optionId: string;
+    try {
+      optionId = await saveOpaqueOption(env, state.workId, {
+        kind: "replace_confirm",
+        delivery: true,
+        accountIdentifier: account,
+        documentId: item.id,
+        documentName: item.name,
+        folderName: screen.folderName,
+      });
+    } catch (err) {
+      console.error(`Replace confirmation staging failed for work ${state.workId} -- nothing was staged`, err);
+      await sendWorkspaceHatMessage(env, target, "⚠️ Could not persist the replace confirmation (storage write refused -- likely the daily KV quota). Nothing was changed.");
+      return state;
+    }
+    // 7. The explicit confirmation check: names the file and its folder, No keeps the output.
+    const confirmButtons: InlineButton[][] = [[
+      { text: "✅ Yes, replace", callback_data: `outputdelivery:${state.workId}:${optionId}` },
+      { text: "❌ No", callback_data: `outputdelivery:${state.workId}:keep` },
+    ]];
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      "♻️ *Replace a Google Doc* -- confirm\n\n" +
+        `*File*: ${escapeTelegramMarkdown(item.name)}\n` +
+        `*Folder*: ${escapeTelegramMarkdown(screen.folderName)}\n\n` +
+        "This overwrites the file's current content with the approved output. " +
+        "You can get the old content back from the Doc's version history in Google Drive.\n\n" +
+        "Replace it?",
+      confirmButtons,
+    );
+    // 8. Log the presented confirmation.
+    await logActivity(env, {
+      entry: "Output delivery replace confirmation presented",
+      type: "Activity",
+      area: state.unit ?? "Operations",
+      activity: `Output delivery replace target selected: '${item.name}' (${item.id}) in '${screen.folderName}' -- awaiting explicit confirmation`,
+      outcome: "Active",
+      workId: state.workId,
+    });
     return state;
   }
 
@@ -2206,10 +2275,19 @@ export async function handleDriveBrowseTap(
     }
     const link = item.webViewLink;
     const escapedName = escapeTelegramMarkdown(item.name);
+    // Replace is offered ONLY in the "Save approved output to Drive" flow and
+    // ONLY for Google Docs: one extra button row on the file card, nothing else.
+    let replaceButtons: InlineButton[][] | undefined;
+    if (screen.context.delivery === true && item.mimeType === "application/vnd.google-apps.document") {
+      const replaceData = buildBrowseCallback(state.workId, tap.screenId, { type: "replace", index: tap.action.index });
+      if (replaceData !== null) {
+        replaceButtons = [[{ text: "♻️ Replace with this output", callback_data: replaceData }]];
+      }
+    }
     if (typeof link === "string" && link.startsWith("https://") && !link.includes(")")) {
-      await sendWorkspaceHatMessage(env, target, `📄 *${escapedName}*\n[Open in Google Drive](${link})`);
+      await sendWorkspaceHatMessage(env, target, `📄 *${escapedName}*\n[Open in Google Drive](${link})`, replaceButtons);
     } else {
-      await sendWorkspaceHatMessage(env, target, `📄 *${escapedName}*\nNo Google Drive link is available for this file.`);
+      await sendWorkspaceHatMessage(env, target, `📄 *${escapedName}*\nNo Google Drive link is available for this file.`, replaceButtons);
     }
     return state;
   }
