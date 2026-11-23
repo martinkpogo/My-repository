@@ -13,6 +13,7 @@ import { cachedWatchRegistry, invalidateWatchRegistry } from "./watchRegistryCac
 import { isAdminAuthorized } from "./adminAuth";
 import { getMyDriveRoot, listDriveFolderContents } from "./googleDriveBrowse";
 import { buildBrowseCallback, parseBrowseValue, readBrowseScreen, saveBrowseScreen, type BrowseAction, type BrowseScreen } from "./googleDriveBrowseScreen";
+import { escapeTelegramMarkdown } from "./runtime/workStatus";
 
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -1899,8 +1900,14 @@ async function renderBrowseScreen(
       : context.delivery === true
         ? `*Save approved output to Google Drive*\n\n*Account*: ${context.accountIdentifier}\n*Title*: ${context.title}\n\n`
         : `*Google Workspace Action*: ${context.docType === "sheet" ? "Create Google Sheet" : "Create Google Doc"}\n\n*Account*: ${context.accountIdentifier}\n*Title*: ${context.title}\n\n`;
+  const safetyLine =
+    context.smoke === true
+      ? "Choose a *disposable* folder for the smoke document (never the production proposal folder).\n"
+      : context.delivery === true
+        ? "You will confirm once more before anything is created.\n"
+        : "";
   const messageText =
-    `${header}📂 *${screen.folderName}*\nOpen a folder, or tap ✅ Save here.` +
+    `${header}${safetyLine}📂 *${escapeTelegramMarkdown(screen.folderName)}*\nOpen a folder, or tap ✅ Save here.` +
     (screen.truncated ? `\n_Showing the first ${MAX_BROWSE_ITEMS} items._` : "");
   await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
