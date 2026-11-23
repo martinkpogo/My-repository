@@ -1511,10 +1511,10 @@ export async function consumeOpaqueOption(
 }
 
 /**
- * Read a staged option WITHOUT consuming it. Paging needs
- * this: the pager re-renders from the same list, so the
- * option must survive the tap (consume deletes it, which is what makes a
- * folder pick single-use -- you cannot pick the same list twice).
+ * Read a staged option WITHOUT consuming it (consumeOpaqueOption deletes it,
+ * which is what makes a pick single-use). Production code reads Drive
+ * browser screens through readBrowseScreen; this helper is kept for tests
+ * that inspect a stored option.
  */
 export async function peekOpaqueOption(
   env: Env,

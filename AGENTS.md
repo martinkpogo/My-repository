@@ -376,6 +376,7 @@ Evidence base: the Drive folder-picker fix and file-browser build (PRs #483–#4
 - Task 1: tests kept failing and the task was moved to another agent.
 - Tasks 7 (finish), 8, 9, 10 and 15 were delivered clean on the first attempt once the brief used the staged layout in `docs/task-instruction-template.md`: named test helpers, a one-test command, a two-attempt retry limit, self-check `grep` commands and explicit git steps. This included the highest-risk task, which moved four save flows into one shared function byte-for-byte.
 - The staged layout appears to compensate for the weaknesses recorded above. Keep using it, and keep independent verification.
+- Round 2, "Replace a Doc" (PRs #491–#495, 2026-11-23): five staged tasks, all delivered clean, including a permission-rule change in `src/access.ts`. On R2-1 it hit a test the brief had not named, stopped under the stop rule, reported the problem with options and a recommendation, and touched nothing until Martin approved. Two reports at first left "CI pending" without pasting the result; the next tasks fixed this when asked.
 
 **Cline** (Task 5 on a phone in Termux/proot Ubuntu; Task 7 on Mac VS Code)
 
