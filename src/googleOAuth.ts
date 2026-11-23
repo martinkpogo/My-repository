@@ -11,6 +11,8 @@ import { getSessionStub, newWorkId, setActiveWorkId } from "./router";
 import { kvDelete, kvGet, kvList, kvPut } from "./kvStore";
 import { cachedWatchRegistry, invalidateWatchRegistry } from "./watchRegistryCache";
 import { isAdminAuthorized } from "./adminAuth";
+import { getMyDriveRoot, listDriveFolderContents } from "./googleDriveBrowse";
+import { buildBrowseCallback, saveBrowseScreen, type BrowseScreen } from "./googleDriveBrowseScreen";
 
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -1727,6 +1729,14 @@ Return JSON: {"isGoogleSheetRequest": true | false, "title": "...", "rows": [["D
   },
 };
 
+/**
+ * Most items one Drive browser screen may show. The listing request itself
+ * fetches up to 1,000; a screen keeps the first 90 (Telegram's keyboard and
+ * message limits make one giant message impossible anyway), and anything
+ * beyond that is flagged in the message rather than silently dropped.
+ */
+const MAX_BROWSE_ITEMS = 90;
+
 export async function handleGoogleAccountSelection(
   env: Env,
   state: WorkState,
@@ -1776,86 +1786,61 @@ export async function handleGoogleAccountSelection(
     return state;
   }
 
-  let folderRes: Response;
-  try {
-    folderRes = await fetch(
-      "https://www.googleapis.com/drive/v3/files?q=mimeType%3D%27application%2Fvnd.google-apps.folder%27+and+trashed%3Dfalse&fields=files(id,name,mimeType,parents,capabilities)&pageSize=50",
-      {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      },
-    );
-  } catch (err) {
+  // Stage C, Task 6: the Drive FILE BROWSER's first screen -- the direct
+  // contents of My Drive's top level -- replaces the old Drive-wide folder
+  // query and the folderlist staging. Everything above this line (option
+  // consumption, flow discriminators, the access-token gate) is unchanged.
+  const root = await getMyDriveRoot(token);
+  if (!root.ok) {
+    const detail = root.reason === "http" && root.status !== undefined ? `HTTP ${root.status}` : root.reason;
     await sendWorkspaceHatMessage(
       env,
       target,
-      `⚠️ Network error listing Google Drive folders for account '${accountIdentifier}'.`,
+      `⚠️ Could not open My Drive for account '${accountIdentifier}' (${detail}).`,
     );
     return state;
   }
 
-  if (!folderRes.ok) {
+  const list = await listDriveFolderContents(token, root.id);
+  if (!list.ok) {
+    const detail = list.reason === "http" && list.status !== undefined ? `HTTP ${list.status}` : list.reason;
     await sendWorkspaceHatMessage(
       env,
       target,
-      `⚠️ Failed to list Google Drive folders for account '${accountIdentifier}' (HTTP ${folderRes.status}).`,
+      `⚠️ Could not list My Drive for account '${accountIdentifier}' (${detail}).`,
     );
     return state;
   }
 
-  let folderData: { files?: Array<{ id: string; name: string }> };
-  try {
-    folderData = await folderRes.json();
-  } catch {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      "⚠️ Invalid JSON response from Google Drive folder query.",
-    );
-    return state;
-  }
+  // An EMPTY My Drive is NOT an error: the screen still shows (only the
+  // "✅ Save here" row), so Martin can save straight into My Drive.
+  const items = list.items.slice(0, MAX_BROWSE_ITEMS);
+  const truncated = list.truncated || list.items.length > MAX_BROWSE_ITEMS;
 
-  const folders = (folderData.files ?? []).sort((a, b) => a.name.localeCompare(b.name));
-  if (folders.length === 0) {
-    await sendWorkspaceHatMessage(
-      env,
-      target,
-      `⚠️ No accessible Drive folders found for account '${accountIdentifier}'.`,
-    );
-    return state;
-  }
-
-  // Folder-option staging is Cloudflare-only too: a refused write is
-  // surfaced explicitly (no picker sent, nothing pretended persisted)
-  // instead of throwing after the flow has already shown partial state.
-  //
-  // ONE write, not one per folder (Martin, 2026-11-18). The picker used to
-  // call saveOpaqueOption once per folder -- up to 50 writes, and with
-  // google_option: Turso-eligible that was up to 50 Turso calls inside a
-  // single Worker invocation, which Cloudflare cut off ("Too many
-  // subrequests by single Worker invocation", Workers Logs 18 Nov 2026
-  // 14:08:25). The whole folder list is now saved as a single option, and
-  // every button carries its folder's POSITION in that list (Telegram's
-  // 64-byte callback_data limit cannot carry a folder id, so the binding
-  // lives in the option, exactly as before -- only the number of writes
-  // changes). The 10 most recently modified folders are shown first; a
-  // "📂 More folders" button reveals the rest.
-  const folderList = folders.map((f) => ({ id: f.id, name: f.name }));
-  const baseOption = smoke
-    ? { kind: "folderlist", smoke: true, accountIdentifier, folders: folderList }
+  // The flow's own data rides along UNCHANGED, minus the old option's `kind`
+  // and `folders` (the screen's structure replaces both), in the same three
+  // shapes the folderlist option carried.
+  const context: Record<string, unknown> = smoke
+    ? { smoke: true, accountIdentifier }
     : delivery
-      ? { kind: "folderlist", delivery: true, docType, accountIdentifier, title, content, rows, folders: folderList }
-      : { kind: "folderlist", docType, accountIdentifier, title, content, rows, folders: folderList };
-  // The id is chosen first and stamped onto the staged list, so a page
-  // re-render can rebuild its own buttons -- in ONE write (staging and then
-  // re-writing the list to add its id was a second write for nothing).
-  const listOpaqueId = crypto.randomUUID().slice(0, 8);
-  try {
-    await kvPut(env, `google_option:${state.workId}:${listOpaqueId}`, JSON.stringify({ ...baseOption, _listOpaqueId: listOpaqueId }), { expirationTtl: 600 });
-  } catch (err) {
-    console.error(`Google folder picker: option staging failed for work ${state.workId} -- no picker was sent`, err);
+      ? { delivery: true, docType, accountIdentifier, title, content, rows }
+      : { docType, accountIdentifier, title, content, rows };
+
+  const screen: BrowseScreen = {
+    kind: "drivebrowse",
+    folderId: root.id,
+    folderName: root.name,
+    items,
+    truncated,
+    context,
+  };
+
+  // ONE storage write per screen (the same discipline the old folderlist
+  // staging had): a refused write is surfaced explicitly -- no picker is
+  // sent, nothing pretends the selection state was persisted.
+  const saved = await saveBrowseScreen(env, state.workId, screen);
+  if (!saved.ok) {
+    console.error(`Google Drive browser: screen staging failed for work ${state.workId} -- no picker was sent`);
     await sendWorkspaceHatMessage(
       env,
       target,
@@ -1863,10 +1848,79 @@ export async function handleGoogleAccountSelection(
     );
     return state;
   }
-  // renderFolderPage (below) builds every page from the same staged list, so
-  // paging costs no extra writes -- the list itself is consumed only when a
-  // folder is actually picked.
-  return renderFolderPage(env, state, target, { ...baseOption, _listOpaqueId: listOpaqueId }, 0);
+  return renderBrowseScreen(env, state, target, saved.screenId, screen);
+}
+
+/**
+ * Renders the stored browse screen as ONE Telegram message: one row per item
+ * (folders "📁", files "📄", in the screen's own order) and a final
+ * "✅ Save here" row. No Back button on the top screen and no paging --
+ * the bounded listing (MAX_BROWSE_ITEMS) fits one message. The buttons carry
+ * only short codes (googlefolder:<workId>:<screenId>:<code>); the binding
+ * lives in the stored screen.
+ */
+async function renderBrowseScreen(
+  env: Env,
+  state: WorkState,
+  target: HatMessageTarget,
+  screenId: string,
+  screen: BrowseScreen,
+): Promise<WorkState> {
+  const buttons: InlineButton[][] = [];
+  for (let i = 0; i < screen.items.length; i++) {
+    const item = screen.items[i]!;
+    const data = buildBrowseCallback(
+      state.workId,
+      screenId,
+      item.kind === "folder" ? { type: "open", index: i } : { type: "file", index: i },
+    );
+    if (data === null) {
+      // A callback that cannot fit Telegram's 64-byte limit means NO picker
+      // at all -- a half-built keyboard is worse than none.
+      await sendWorkspaceHatMessage(env, target, "⚠️ Could not build the Drive browser buttons.");
+      return state;
+    }
+    buttons.push([{ text: `${item.kind === "folder" ? "📁" : "📄"} ${item.name}`, callback_data: data }]);
+  }
+  const saveData = buildBrowseCallback(state.workId, screenId, { type: "save" });
+  if (saveData === null) {
+    await sendWorkspaceHatMessage(env, target, "⚠️ Could not build the Drive browser buttons.");
+    return state;
+  }
+  buttons.push([{ text: "✅ Save here", callback_data: saveData }]);
+
+  // The three header variants are renderFolderPage's, word for word; only
+  // its final "Select ..." sentence is replaced by the browser's own line.
+  const context: Record<string, any> = screen.context;
+  const header =
+    context.smoke === true
+      ? `🧪 *GOVERNED TOOL REGISTRY SMOKE*\n\n*Account*: ${context.accountIdentifier}\n\n`
+      : context.delivery === true
+        ? `*Save approved output to Google Drive*\n\n*Account*: ${context.accountIdentifier}\n*Title*: ${context.title}\n\n`
+        : `*Google Workspace Action*: ${context.docType === "sheet" ? "Create Google Sheet" : "Create Google Doc"}\n\n*Account*: ${context.accountIdentifier}\n*Title*: ${context.title}\n\n`;
+  const messageText =
+    `${header}📂 *${screen.folderName}*\nOpen a folder, or tap ✅ Save here.` +
+    (screen.truncated ? `\n_Showing the first ${MAX_BROWSE_ITEMS} items._` : "");
+  await sendWorkspaceHatMessage(env, target, messageText, buttons);
+
+  // Logging is exactly renderFolderPage's: same entry names, same fields.
+  if (context.smoke === true) {
+    await logActivity(env, {
+      entry: "Google Docs Registry smoke: folder picker presented",
+      type: "Activity",
+      activity: `Registry smoke Drive folder picker presented for account '${context.accountIdentifier}'`,
+      outcome: "Active",
+      workId: state.workId,
+    });
+  } else {
+    await logActivity(env, {
+      entry: "Google Drive folders presented",
+      type: "Activity",
+      activity: `Drive folder picker presented for account '${context.accountIdentifier}'`,
+      outcome: "Active",
+    });
+  }
+  return state;
 }
 
 /**

@@ -37,6 +37,7 @@ import {
 } from "./googleOAuth";
 import { buildProposalDocLayout } from "./proposalRedline";
 import { parseCallbackData } from "./telegramCallbackData";
+import { parseBrowseValue } from "./googleDriveBrowseScreen";
 import type { WorkState } from "./types";
 
 function createMockKv() {
@@ -268,20 +269,41 @@ test("Folder picker queries drive folders using selected account and uses opaque
     updatedAt: new Date().toISOString(),
   };
 
-  let driveQueryCalled = false;
+  let rootCalls = 0;
+  let listCalls = 0;
   let sentButtons: any[] = [];
 
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     const urlStr = String(url);
+    const auth = (init?.headers as Record<string, string> | undefined)?.Authorization;
 
+    // (1) My Drive's real root id -- the browser's first Drive call. The
+    // mock must answer the ROOT url with { id, name }; answering it with a
+    // files list is what the old single mock did and it fails closed here.
+    if (urlStr.includes("googleapis.com/drive/v3/files/root")) {
+      rootCalls++;
+      assert.strictEqual(auth, "Bearer token-account-1", "the root lookup uses the selected account's token");
+      return new Response(
+        JSON.stringify({ id: "root-id-abc123", name: "My Drive" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    // (2) The listing of that root's direct contents.
     if (urlStr.includes("googleapis.com/drive/v3/files")) {
-      driveQueryCalled = true;
-      assert.ok(urlStr.includes("mimeType%3D%27application%2Fvnd.google-apps.folder%27"));
+      listCalls++;
+      assert.strictEqual(auth, "Bearer token-account-1", "the listing uses the selected account's token");
+      // URLSearchParams on the URL gives the DECODED query (a "+" is a space).
+      assert.ok(
+        new URL(urlStr).searchParams.get("q")?.includes("'root-id-abc123' in parents"),
+        `the listing must query the root id returned by (1), got: ${urlStr}`,
+      );
       return new Response(
         JSON.stringify({
           files: [
-            { id: "folder-id-abc", name: "Client Proposals" },
-            { id: "folder-id-xyz", name: "Internal Notes" },
+            { id: "folder-id-abc", name: "Client Proposals", mimeType: "application/vnd.google-apps.folder" },
+            { id: "folder-id-xyz", name: "Internal Notes", mimeType: "application/vnd.google-apps.folder" },
+            { id: "file-id-1", name: "notes.txt", mimeType: "text/plain" },
           ],
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -299,29 +321,28 @@ test("Folder picker queries drive folders using selected account and uses opaque
 
   try {
     await handleGoogleAccountSelection(fakeEnv, state, opaqueOptionId);
-    assert.strictEqual(driveQueryCalled, true);
-    assert.ok(sentButtons.length >= 2);
+    assert.strictEqual(rootCalls, 1, "exactly one files/root call");
+    assert.strictEqual(listCalls, 1, "exactly one listing call");
+    assert.strictEqual(sentButtons.length, 4, "one row per item (2 folders + 1 file) plus Save here");
 
-    // Verify callback data carries the staged list's opaque id plus a POSITION
-    // into it -- never the raw folder id (Martin, 2026-11-18: the list is
-    // staged as ONE option, not one per folder).
-    const folderCallback = sentButtons[0][0].callback_data;
-    assert.match(folderCallback, /^googlefolder:work-picker-100:[a-f0-9-]+:\d+$/);
-    assert.strictEqual(folderCallback.includes("folder-id-abc"), false);
+    // Every button carries the browse screen's opaque id plus a short action
+    // code -- never a raw Drive id (the binding lives in the stored screen).
+    for (const row of sentButtons) {
+      const callback = row[0].callback_data as string;
+      assert.match(callback, /^googlefolder:work-picker-100:[a-f0-9]{8}:/);
+      assert.strictEqual(callback.includes("folder-id-abc"), false);
+      assert.strictEqual(callback.includes("root-id-abc123"), false);
+    }
+    assert.strictEqual(sentButtons[3][0].text, "✅ Save here");
 
-    // The callback carries the staged list's own opaque id (the account
-    // option was consumed by handleGoogleAccountSelection, so peek the LIST
-    // id, not the account id). The list survives paging: peek, not consume.
-    const listOpaqueId = folderCallback.split(":")[2]!;
-    const replayOption = await peekOpaqueOption(fakeEnv, workId, listOpaqueId);
-    assert.ok(replayOption, "the folder list survives paging (peek, not consume)");
-    assert.ok(Array.isArray(replayOption.folders) && replayOption.folders.length === 2);
-    // Tapping a folder consumes the list: a replayed button cannot re-pick. The
-    // handler receives the value segment (index.ts splits callback_data as
-    // action:workId:value), i.e. "<listOpaqueId>:<position>".
-    await handleGoogleFolderSelection(fakeEnv, state, folderCallback.split(":").slice(2).join(":"));
-    const gone = await peekOpaqueOption(fakeEnv, workId, listOpaqueId);
-    assert.strictEqual(gone, null, "the list is consumed once a folder is picked");
+    // The screen itself is staged as ONE record under the id the buttons
+    // carry, and peek (not consume) reads it back -- the tap path needs it.
+    const screenId = (sentButtons[0][0].callback_data as string).split(":")[2]!;
+    const screen = await peekOpaqueOption(fakeEnv, workId, screenId);
+    assert.ok(screen, "the browse screen survives until a button is tapped (peek, not consume)");
+    assert.strictEqual(screen.kind, "drivebrowse");
+    assert.strictEqual(screen.folderId, "root-id-abc123");
+    assert.strictEqual(screen.items.length, 3);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1837,7 +1858,7 @@ test("handleGoogleActionApproval registers the created sheet for comment-trigger
   assert.strictEqual(watched[0].accountIdentifier, "owner@enig.com");
 });
 
-test("Round-trip: index.ts callback parsing of the second folder button picks that folder (no 'no longer current')", async () => {
+test("Round-trip: index.ts callback parsing of the second folder button keeps its position (the 4th piece survives parsing)", async () => {
   const { fakeEnv } = createFakeEnv();
   const originalFetch = globalThis.fetch;
 
@@ -1864,17 +1885,22 @@ test("Round-trip: index.ts callback parsing of the second folder button picks th
   };
 
   let sentButtons: any[] = [];
-  let sentText = "";
 
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     const urlStr = String(url);
+    if (urlStr.includes("googleapis.com/drive/v3/files/root")) {
+      return new Response(
+        JSON.stringify({ id: "root-id-abc123", name: "My Drive" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
     if (urlStr.includes("googleapis.com/drive/v3/files")) {
       return new Response(
         JSON.stringify({
           files: [
-            { id: "folder-a", name: "Folder A" },
-            { id: "folder-b", name: "Folder B" },
-            { id: "folder-c", name: "Folder C" },
+            { id: "folder-a", name: "Folder A", mimeType: "application/vnd.google-apps.folder" },
+            { id: "folder-b", name: "Folder B", mimeType: "application/vnd.google-apps.folder" },
+            { id: "folder-c", name: "Folder C", mimeType: "application/vnd.google-apps.folder" },
           ],
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -1882,7 +1908,6 @@ test("Round-trip: index.ts callback parsing of the second folder button picks th
     }
     if (urlStr.includes("api.telegram.org")) {
       const body = JSON.parse(String(init?.body));
-      sentText = body.text || "";
       sentButtons = body.reply_markup?.inline_keyboard || [];
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }
@@ -1890,33 +1915,398 @@ test("Round-trip: index.ts callback parsing of the second folder button picks th
   }) as typeof fetch;
 
   try {
-    // Build a REAL folder picker through the account-selection stage, exactly
-    // as production does, and take the SECOND folder button's callback_data
+    // Build a REAL browse screen through the account-selection stage, exactly
+    // as production does, and take the SECOND item button's callback_data
     // from the Telegram message that was sent.
     await handleGoogleAccountSelection(fakeEnv, state, accountOptionId);
-    assert.strictEqual(sentButtons.length, 3, "one button per folder row");
-    const secondFolderData = sentButtons[1][0].callback_data;
-    assert.match(secondFolderData, /^googlefolder:work-roundtrip-1:[a-f0-9-]+:1$/);
+    assert.strictEqual(sentButtons.length, 4, "one button per item row plus Save here");
+    const secondItemData = sentButtons[1][0].callback_data;
+    assert.match(secondItemData, /^googlefolder:work-roundtrip-1:[a-f0-9]{8}:o1$/);
 
     // RED/GREEN seam: index.ts parses the callback_data before the handler
     // ever sees it. This test performs that same parse so a truncating parse
     // fails here instead of in production.
-    const { action, workId: parsedWorkId, value } = parseCallbackData(secondFolderData);
+    const { action, workId: parsedWorkId, value } = parseCallbackData(secondItemData);
     assert.strictEqual(action, "googlefolder");
     assert.strictEqual(parsedWorkId, workId);
 
-    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, value);
-
-    assert.strictEqual(
-      updatedState.pendingGoogleAction?.folderId,
-      "folder-b",
-      "the SECOND folder must be the one chosen",
-    );
+    // ...and the 4th piece ("<screenId>:<code>") must decode back to the
+    // SECOND item's position -- the tap handler (a later task) resolves the
+    // item from it, so a parse that drops or corrupts it fails here.
+    const parsed = parseBrowseValue(value);
+    assert.ok(parsed, `the 4th piece must survive parsing, got value: ${value}`);
     assert.ok(
-      !sentText.includes("no longer current"),
-      `no "no longer current" message may be sent, got: ${sentText}`,
+      parsed.action.type === "open" || parsed.action.type === "file",
+      `expected an item action, got ${parsed.action.type}`,
     );
+    assert.strictEqual(parsed.action.index, 1, "the SECOND item's position must survive the round trip");
+    assert.strictEqual(parsed.screenId, secondItemData.split(":")[2]);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Drive file browser (Stage C, Task 6): the top-level My Drive screen.
+// ---------------------------------------------------------------------------
+
+const BROWSE_ROOT_ID = "root-id-abc123";
+
+/**
+ * Scripts the two Drive calls the browser makes -- files/root and the
+ * listing of that root -- plus Telegram, capturing every picker keyboard and
+ * message text the flow sends. Drive mocks that match any `/drive/v3/files`
+ * URL must answer the ROOT url with { id, name } and the listing url with
+ * { files: [...] }; the root branch below does that by default.
+ */
+function installBrowseFake(opts: {
+  root?: { status?: number; body?: unknown };
+  listing?: { status?: number; body?: unknown };
+} = {}) {
+  const pickers: any[][][] = [];
+  const texts: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.includes("googleapis.com/drive/v3/files/root")) {
+      const o = opts.root;
+      return new Response(
+        JSON.stringify(o?.body ?? { id: BROWSE_ROOT_ID, name: "My Drive" }),
+        { status: o?.status ?? 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (urlStr.includes("googleapis.com/drive/v3/files")) {
+      const o = opts.listing;
+      return new Response(
+        JSON.stringify(o?.body ?? { files: [] }),
+        { status: o?.status ?? 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      texts.push(String(body.text ?? ""));
+      if (body.reply_markup?.inline_keyboard) pickers.push(body.reply_markup.inline_keyboard);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  return {
+    pickers,
+    texts,
+    restore() {
+      globalThis.fetch = originalFetch;
+    },
+  };
+}
+
+function browseState(workId: string): WorkState {
+  return {
+    workId,
+    chatId: 12345,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/** Authorizes the browser's account and stages its account option (real staging, not a fixture). */
+async function stageBrowseAccount(
+  fakeEnv: Env,
+  workId: string,
+  option: Record<string, unknown> = {},
+): Promise<string> {
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  return saveOpaqueOption(fakeEnv, workId, {
+    kind: "account",
+    accountIdentifier: "user@enig.com",
+    title: "Browse Doc",
+    content: "Browse body",
+    ...option,
+  });
+}
+
+function screenIdOf(row: any[]): string {
+  return String(row[0].callback_data).split(":")[2]!;
+}
+
+function storedScreen(mockKv: ReturnType<typeof createMockKv>, workId: string, screenId: string): any {
+  const entry = mockKv._rawStore.get(`google_option:${workId}:${screenId}`);
+  assert.ok(entry, `the browse screen ${screenId} must be stored`);
+  return JSON.parse(entry.value);
+}
+
+/** Counts storage writes made WHILE the handler runs, for this work's google_option: keys only (the `reply_msg:` bookkeeping every sent message performs is not a staging write). */
+function countOptionWrites(mockKv: ReturnType<typeof createMockKv>, workId: string): () => number {
+  const store = mockKv._rawStore;
+  const originalSet = store.set.bind(store);
+  let writes = 0;
+  (store as any).set = (...args: any[]) => {
+    if (typeof args[0] === "string" && args[0].startsWith(`google_option:${workId}:`)) writes++;
+    return (originalSet as any)(...args);
+  };
+  return () => writes;
+}
+
+function stagedOptionKeys(mockKv: ReturnType<typeof createMockKv>, workId: string): string[] {
+  return [...mockKv._rawStore.keys()].filter((k) => k.startsWith(`google_option:${workId}:`));
+}
+
+test("Empty My Drive still shows the browser screen with only the Save here button", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-browse-empty";
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+  const drive = installBrowseFake({ listing: { body: { files: [] } } });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+
+    assert.strictEqual(drive.pickers.length, 1, "exactly one picker message");
+    const rows = drive.pickers[0]!;
+    assert.strictEqual(rows.length, 1, "an empty My Drive shows only the Save here row");
+    assert.strictEqual(rows[0][0].text, "✅ Save here");
+    assert.match(rows[0][0].callback_data, /^googlefolder:work-browse-empty:[a-f0-9]{8}:s$/);
+
+    const screen = storedScreen(mockKv, workId, screenIdOf(rows[0]));
+    assert.strictEqual(screen.kind, "drivebrowse");
+    assert.deepStrictEqual(screen.items, [], "no items -- but the screen is stored");
+    assert.strictEqual(screen.folderName, "My Drive");
+    assert.strictEqual(screen.truncated, false);
+    assert.ok(drive.texts.join("\n").includes("📂 *My Drive*"), "the folder line is still shown");
+  } finally {
+    drive.restore();
+  }
+});
+
+test("Mixed My Drive contents render folders first, then files, then Save here -- with no Back button", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-browse-mixed";
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [
+          { id: "file-z", name: "Zebra notes", mimeType: "text/plain" },
+          { id: "folder-b", name: "Beta folder", mimeType: "application/vnd.google-apps.folder" },
+          { id: "folder-a", name: "Alpha folder", mimeType: "application/vnd.google-apps.folder" },
+          { id: "file-a", name: "Alpha notes", mimeType: "text/plain" },
+        ],
+      },
+    },
+  });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+
+    const rows = drive.pickers[0]!;
+    // listDriveFolderContents sorts folders first, then files (A-Z inside
+    // each group) -- the buttons must follow that exact order.
+    assert.deepStrictEqual(
+      rows.map((r) => r[0].text),
+      ["📁 Alpha folder", "📁 Beta folder", "📄 Alpha notes", "📄 Zebra notes", "✅ Save here"],
+    );
+    assert.deepStrictEqual(
+      rows.map((r) => String(r[0].callback_data).split(":").pop()),
+      ["o0", "o1", "f2", "f3", "s"],
+      "folders use 'open' codes, files 'file' codes, by their screen position",
+    );
+    assert.strictEqual(
+      rows.some((r) => /back/i.test(String(r[0].text))),
+      false,
+      "no Back button on the top screen",
+    );
+    assert.ok(drive.texts.join("\n").includes("📂 *My Drive*"), "text contains the folder line");
+
+    const screen = storedScreen(mockKv, workId, screenIdOf(rows[0]));
+    assert.strictEqual(screen.folderId, BROWSE_ROOT_ID);
+    assert.strictEqual(screen.parentScreenId, undefined, "no parentScreenId at the top");
+    assert.strictEqual(screen.items.length, 4);
+  } finally {
+    drive.restore();
+  }
+});
+
+test("A 120-item My Drive shows exactly 90 item buttons plus Save here and says it is showing the first 90", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-browse-120";
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+  const files = Array.from({ length: 120 }, (_, i) => ({
+    id: `item-${i}`,
+    name: `Item ${String(i).padStart(3, "0")}`,
+    mimeType: "application/vnd.google-apps.folder",
+  }));
+  const drive = installBrowseFake({ listing: { body: { files } } });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+
+    const rows = drive.pickers[0]!;
+    assert.strictEqual(rows.length, 91, "exactly 90 item buttons + Save here");
+    assert.strictEqual(rows[90][0].text, "✅ Save here", "Save here is the LAST row");
+    assert.strictEqual(
+      rows.slice(0, 90).every((r) => String(r[0].text).startsWith("📁")),
+      true,
+    );
+    const text = drive.texts.join("\n");
+    assert.ok(text.includes("Showing the first 90 items"), `truncation note missing, got: ${text}`);
+
+    const screen = storedScreen(mockKv, workId, screenIdOf(rows[0]));
+    assert.strictEqual(screen.items.length, 90, "the stored screen keeps at most 90 items");
+    assert.strictEqual(screen.truncated, true);
+  } finally {
+    drive.restore();
+  }
+});
+
+test("A My Drive root failure (HTTP 401) reports it and stages nothing", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-browse-root-401";
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+  const drive = installBrowseFake({
+    root: { status: 401, body: { error: { code: 401, message: "Invalid Credentials" } } },
+  });
+  const optionWrites = countOptionWrites(mockKv, workId);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+
+    const text = drive.texts.join("\n");
+    assert.ok(
+      text.includes("⚠️ Could not open My Drive for account 'user@enig.com' (HTTP 401)."),
+      `expected the Could not open My Drive message, got: ${text}`,
+    );
+    assert.strictEqual(drive.pickers.length, 0, "no picker is sent");
+    assert.strictEqual(optionWrites(), 0, "ZERO storage writes -- nothing is staged");
+    assert.deepStrictEqual(stagedOptionKeys(mockKv, workId), [], "no google_option: record survives");
+  } finally {
+    drive.restore();
+  }
+});
+
+test("A My Drive listing failure reports it and stages nothing", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-browse-list-500";
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+  const drive = installBrowseFake({
+    listing: { status: 500, body: { error: { code: 500, message: "Internal error" } } },
+  });
+  const optionWrites = countOptionWrites(mockKv, workId);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+
+    const text = drive.texts.join("\n");
+    assert.ok(
+      text.includes("⚠️ Could not list My Drive for account 'user@enig.com' (HTTP 500)."),
+      `expected the Could not list My Drive message, got: ${text}`,
+    );
+    assert.strictEqual(drive.pickers.length, 0, "no picker is sent");
+    assert.strictEqual(optionWrites(), 0, "ZERO storage writes -- nothing is staged");
+    assert.deepStrictEqual(stagedOptionKeys(mockKv, workId), [], "no google_option: record survives");
+  } finally {
+    drive.restore();
+  }
+});
+
+test("A refused screen write reports the staging failure and sends no picker", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-browse-refused";
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+  const drive = installBrowseFake({
+    listing: {
+      body: { files: [{ id: "folder-a", name: "Alpha folder", mimeType: "application/vnd.google-apps.folder" }] },
+    },
+  });
+  // The single storage write the screen needs is refused (KV quota).
+  mockKv.put = async () => {
+    throw new Error("KV write refused (quota)");
+  };
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+
+    const text = drive.texts.join("\n");
+    assert.ok(
+      text.includes("⚠️ Could not persist the folder-selection options"),
+      `expected the Could not persist message, got: ${text}`,
+    );
+    assert.strictEqual(drive.pickers.length, 0, "NO picker is sent");
+    assert.deepStrictEqual(stagedOptionKeys(mockKv, workId), [], "nothing is staged");
+  } finally {
+    drive.restore();
+  }
+});
+
+test("The stored screen's context is correct for the smoke, delivery and normal flows", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const drive = installBrowseFake({
+    listing: {
+      body: { files: [{ id: "folder-a", name: "Alpha folder", mimeType: "application/vnd.google-apps.folder" }] },
+    },
+  });
+
+  try {
+    // smoke -- the flag and the account only, exactly what staged it.
+    const smokeWork = "work-ctx-smoke";
+    const smokeOption = await stageBrowseAccount(fakeEnv, smokeWork, {
+      smoke: true,
+      title: undefined,
+      content: undefined,
+    });
+    await handleGoogleAccountSelection(fakeEnv, browseState(smokeWork), smokeOption);
+    const smokeScreen = storedScreen(mockKv, smokeWork, screenIdOf(drive.pickers[0]![0]));
+    assert.deepStrictEqual(smokeScreen.context, {
+      smoke: true,
+      accountIdentifier: "user@enig.com",
+    });
+
+    // delivery -- the delivery flag rides with the full payload.
+    const deliveryWork = "work-ctx-delivery";
+    const deliveryOption = await stageBrowseAccount(fakeEnv, deliveryWork, {
+      delivery: true,
+      docType: "sheet",
+      title: "Report",
+      content: "Report body",
+      rows: [["Column"], ["Value"]],
+    });
+    await handleGoogleAccountSelection(fakeEnv, browseState(deliveryWork), deliveryOption);
+    const deliveryScreen = storedScreen(mockKv, deliveryWork, screenIdOf(drive.pickers[1]![0]));
+    assert.deepStrictEqual(deliveryScreen.context, {
+      delivery: true,
+      docType: "sheet",
+      accountIdentifier: "user@enig.com",
+      title: "Report",
+      content: "Report body",
+      rows: [["Column"], ["Value"]],
+    });
+
+    // normal -- no flags, the creation payload unchanged.
+    const normalWork = "work-ctx-normal";
+    const normalOption = await stageBrowseAccount(fakeEnv, normalWork, {
+      title: "My Doc",
+      content: "My body",
+      rows: [["H1", "H2"], ["v1", "v2"]],
+    });
+    await handleGoogleAccountSelection(fakeEnv, browseState(normalWork), normalOption);
+    const normalScreen = storedScreen(mockKv, normalWork, screenIdOf(drive.pickers[2]![0]));
+    assert.deepStrictEqual(normalScreen.context, {
+      docType: "doc",
+      accountIdentifier: "user@enig.com",
+      title: "My Doc",
+      content: "My body",
+      rows: [["H1", "H2"], ["v1", "v2"]],
+    });
+
+    // In every shape the old option's `kind` and `folders` are gone -- the
+    // screen's structure replaces them.
+    for (const screen of [smokeScreen, deliveryScreen, normalScreen]) {
+      assert.strictEqual("kind" in screen.context, false, "kind must not ride along");
+      assert.strictEqual("folders" in screen.context, false, "folders must not ride along");
+    }
+  } finally {
+    drive.restore();
   }
 });
