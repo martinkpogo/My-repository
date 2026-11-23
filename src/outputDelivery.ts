@@ -33,9 +33,10 @@ import type { InlineButton } from "./telegram";
 import { HatMessageTarget, sendWorkspaceHatMessage } from "./telegram";
 import { logActivity } from "./log";
 import { invokeTool } from "./runtime/toolRegistry";
-import { mintExternalToolApprovalProof, workSessionContext } from "./access";
+import { mintExternalToolApprovalProof, workSessionContext, SHARED_OUTPUT_REPLACE_OPERATION_ID } from "./access";
 import { findIdentityViolation, type HandoffIdentity } from "./handoffWriter";
 import { listAuthorizedGoogleAccounts, saveOpaqueOption } from "./googleOAuth";
+import { escapeTelegramMarkdown } from "./runtime/workStatus";
 
 /** The callback prefix for the shared output-delivery buttons (index.ts splits `action:workId:value`). */
 export const OUTPUT_DELIVERY_CALLBACK = "outputdelivery";
@@ -344,6 +345,112 @@ export async function confirmOutputDelivery(
     type: "Activity",
     area: state.unit ?? "Operations",
     activity: `Output delivery for work ${state.workId} into '${folderName}' (${folderId}) ended ${outcome.state}${url ? ` -- ${url}` : ""}.`,
+    outcome: outcome.state === "succeeded" ? "Complete" : "Active",
+    workId: state.workId,
+  });
+  return state;
+}
+
+/**
+ * The replace step (Martin's decision, 2026-11-23): overwrite an EXISTING
+ * Google Doc with the Work's own approved output. The proof is minted from
+ * this final "Yes, replace" tap and bound to the exact document
+ * (gdrive:document:<documentId>), so a proof can never authorize a
+ * different document. Runs `google_docs.update_and_verify` through the
+ * shared Tool Registry invocation boundary -- the same boundary as the
+ * create step, same guarantees: every outcome is reported honestly and
+ * never retried automatically; an uncertain effect keeps its durable record
+ * for reconciliation; the captured output is consumed either way.
+ */
+export async function confirmOutputDeliveryReplace(
+  env: Env,
+  state: WorkState,
+  accountIdentifier: string,
+  documentId: string,
+  documentName: string,
+  folderName: string,
+): Promise<WorkState> {
+  const target: HatMessageTarget = { chatId: state.chatId, threadId: state.threadId, hat: state.hat, workId: state.workId };
+  const captured = state.outputDelivery;
+  if (!captured) {
+    await sendWorkspaceHatMessage(env, target, "There is no approved output waiting to be saved for this work item.");
+    return state;
+  }
+
+  // Re-check token-safety at replacement time: state may have changed identity
+  // fields between capture and confirmation, and nothing identity-bearing
+  // may reach Google even then.
+  if (!isDeliveryTokenSafe(state, captured.text)) {
+    state.outputDelivery = undefined;
+    await sendWorkspaceHatMessage(
+      env,
+      target,
+      "⚠️ This output no longer passes the identity check, so nothing was created in Google Drive.",
+    );
+    return state;
+  }
+
+  // The one shared Access rule (src/access.ts): the proof is minted from this
+  // final tap and bound to the exact document being replaced.
+  const target_resource_id = `gdrive:document:${documentId}`;
+  const proof = mintExternalToolApprovalProof(state, {
+    toolId: "google_docs",
+    operationId: SHARED_OUTPUT_REPLACE_OPERATION_ID,
+    targetResourceId: target_resource_id,
+  });
+
+  const outcome = await invokeTool(
+    env,
+    {
+      tool_id: "google_docs",
+      operation_id: SHARED_OUTPUT_REPLACE_OPERATION_ID,
+      input: {
+        document_id: documentId,
+        account_identifier: accountIdentifier,
+        // The captured output is the PROTECTED form (it must never carry the
+        // real names in a stored record), so the specification declares the
+        // one presentation instruction the Doc needs: the Tool applies the
+        // shared identity restoration at this final internal-presentation
+        // boundary of the write. The update contract takes no title and no
+        // folder: it targets the exact existing document.
+        document_specification: { text: captured.text, presentation: { restore_identity_placeholders: true } },
+      },
+    },
+    workSessionContext(state, proof),
+  );
+
+  // The captured output is consumed either way: a re-tap must never re-apply
+  // the same overwrite blindly.
+  state.outputDelivery = undefined;
+
+  const url = outcome.remote_resource?.url;
+  switch (outcome.state) {
+    case "succeeded":
+      await sendWorkspaceHatMessage(
+        env,
+        target,
+        `✅ Replaced *${escapeTelegramMarkdown(documentName)}* in *${escapeTelegramMarkdown(folderName)}* with this output${url ? `\n${url}` : ""}`,
+      );
+      break;
+    case "denied":
+      await sendWorkspaceHatMessage(env, target, `🛑 Not replaced -- the governance boundary refused it: ${outcome.reason ?? "no detail"}`);
+      break;
+    case "failed":
+      await sendWorkspaceHatMessage(env, target, `⚠️ Not replaced -- ${outcome.reason ?? "it failed"}. Nothing will be retried automatically.`);
+      break;
+    default:
+      await sendWorkspaceHatMessage(
+        env,
+        target,
+        `⚠️ Replace ended ${outcome.state} -- ${outcome.reason ?? "the remote state could not be confirmed"}. The document may have been partly changed; it must be reconciled before anything else is written to it.`,
+      );
+  }
+
+  await logActivity(env, {
+    entry: `Output delivery replace ${outcome.state}`,
+    type: "Activity",
+    area: state.unit ?? "Operations",
+    activity: `Output delivery for work ${state.workId} replaced '${documentName}' (${documentId}) in '${folderName}' -- ended ${outcome.state}${url ? ` -- ${url}` : ""}.`,
     outcome: outcome.state === "succeeded" ? "Complete" : "Active",
     workId: state.workId,
   });
