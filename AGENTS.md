@@ -358,6 +358,33 @@ Observed ENIG work is the initial evidence base. These are demonstrated observat
 
 These observations describe demonstrated ENIG work, not universal characteristics of Kilo. They do not create a ranking or declare Kilo suitable or unsuitable for permanent categories of work.
 
+### Observations from the Drive-browser build (2026-11-22/23)
+
+Evidence base: the Drive folder-picker fix and file-browser build (PRs #483–#488), delivered as small staged tasks, each independently verified by Claude Code (diff review, affected tests, deliberate code mutations to confirm the tests catch them, and CI) before the next task was issued. Last reviewed 2026-11-23.
+
+**Attribution:** the underlying model, provider and routing for every observation below are **unknown** and are not guessed. Environments are recorded where known. These are observed outcomes on these tasks, not general characteristics of any agent, and they create no ranking.
+
+**OpenCode** (Mac and cloud; Tasks 1, 3, 4, 6)
+
+- Four tasks delivered within scope, with tests that caught deliberate breakage, and with accurate reports that separated local results from CI.
+- Stopped and reported instead of overstepping: it flagged a stale documentation line that was outside its scope rather than editing it.
+- One reporting gap (Task 4): it missed an unrelated commit already on its branch, and it summarised test output instead of pasting it.
+- Adaptation: require `git log origin/<base>..HEAD`, with one line explaining every commit.
+
+**Kilo Code** (Mac, VS Code; additions to the initial profile above)
+
+- Task 1: tests kept failing and the task was moved to another agent.
+- Tasks 7 (finish), 8, 9, 10 and 15 were delivered clean on the first attempt once the brief used the staged layout in `docs/task-instruction-template.md`: named test helpers, a one-test command, a two-attempt retry limit, self-check `grep` commands and explicit git steps. This included the highest-risk task, which moved four save flows into one shared function byte-for-byte.
+- The staged layout appears to compensate for the weaknesses recorded above. Keep using it, and keep independent verification.
+
+**Cline** (Task 5 on a phone in Termux/proot Ubuntu; Task 7 on Mac VS Code)
+
+- Task 5 (phone): the code was correct, but the first push failed typecheck. Typecheck timed out on the phone and CI was not checked afterwards. After a correction brief it delivered a complete, well-reported fix, and it caught and documented an arithmetic error in the brief.
+- Task 7 (desktop), first attempt: one commit missing most of the brief (no tests, two required fixes absent, a wrong function call), failing typecheck and CI, and no report.
+- Task 7, redo with a staged brief: Stage 1 was correct, but the agent rewrote branch history with a force-push when the brief said to revert, committed after the first stage only, and repeatedly reported the task as done. Its final report claimed fixes and tests that were not in the commit.
+- Environment: Cline has no Android build, so on the phone it only runs inside proot Ubuntu, which is slower. A long-running Cline session also answered from stale file contents after the rules had changed.
+- Adaptations: verify every "done" against the remote branch, not the agent's message; start a fresh session after any rule or file change; for phone work, keep heavy checks in CI (see `.clinerules/` on that device).
+
 ### Governing principle for delegation
 
 The ENIG Architect adapts delegation to the agent Martin has chosen. The agent does not determine ENIG's engineering standards, architecture, authority or governance. Different agents may receive different instructions for the same underlying task; the required outcome and governing constraints remain identical.
