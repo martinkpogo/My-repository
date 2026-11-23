@@ -12,7 +12,7 @@ import { kvDelete, kvGet, kvList, kvPut } from "./kvStore";
 import { cachedWatchRegistry, invalidateWatchRegistry } from "./watchRegistryCache";
 import { isAdminAuthorized } from "./adminAuth";
 import { getMyDriveRoot, listDriveFolderContents } from "./googleDriveBrowse";
-import { buildBrowseCallback, saveBrowseScreen, type BrowseScreen } from "./googleDriveBrowseScreen";
+import { buildBrowseCallback, parseBrowseValue, readBrowseScreen, saveBrowseScreen, type BrowseAction, type BrowseScreen } from "./googleDriveBrowseScreen";
 
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -1848,7 +1848,7 @@ export async function handleGoogleAccountSelection(
     );
     return state;
   }
-  return renderBrowseScreen(env, state, target, saved.screenId, screen);
+  return renderBrowseScreen(env, state, target, saved.screenId, screen, { logPresented: true });
 }
 
 /**
@@ -1865,6 +1865,7 @@ async function renderBrowseScreen(
   target: HatMessageTarget,
   screenId: string,
   screen: BrowseScreen,
+  options: { logPresented: boolean },
 ): Promise<WorkState> {
   const buttons: InlineButton[][] = [];
   for (let i = 0; i < screen.items.length; i++) {
@@ -1904,21 +1905,26 @@ async function renderBrowseScreen(
   await sendWorkspaceHatMessage(env, target, messageText, buttons);
 
   // Logging is exactly renderFolderPage's: same entry names, same fields.
-  if (context.smoke === true) {
-    await logActivity(env, {
-      entry: "Google Docs Registry smoke: folder picker presented",
-      type: "Activity",
-      activity: `Registry smoke Drive folder picker presented for account '${context.accountIdentifier}'`,
-      outcome: "Active",
-      workId: state.workId,
-    });
-  } else {
-    await logActivity(env, {
-      entry: "Google Drive folders presented",
-      type: "Activity",
-      activity: `Drive folder picker presented for account '${context.accountIdentifier}'`,
-      outcome: "Active",
-    });
+// Only log when options.logPresented is true (the top screen's logging
+// stays exactly as it is now because handleGoogleAccountSelection passes
+// { logPresented: true }).
+  if (options.logPresented) {
+    if (context.smoke === true) {
+      await logActivity(env, {
+        entry: "Google Docs Registry smoke: folder picker presented",
+        type: "Activity",
+        activity: `Registry smoke Drive folder picker presented for account '${context.accountIdentifier}'`,
+        outcome: "Active",
+        workId: state.workId,
+      });
+    } else {
+      await logActivity(env, {
+        entry: "Google Drive folders presented",
+        type: "Activity",
+        activity: `Drive folder picker presented for account '${context.accountIdentifier}'`,
+        outcome: "Active",
+      });
+    }
   }
   return state;
 }
@@ -1981,6 +1987,14 @@ export async function handleGoogleFolderSelection(
     hat: state.hat,
     workId: state.workId,
   };
+
+  // Routing for Drive browser folder taps (Task 7): if the opaque option
+  // id is a browse value (screenId:code), route to handleDriveBrowseTap
+  // so tapping a 📁 folder opens it as a new screen. Old folderlist values
+  // (e.g. "ab12cd34:3" or "ab12cd34:more") are rejected by parseBrowseValue
+  // and fall through to the existing folderlist logic.
+  const browse = parseBrowseValue(opaqueOptionId);
+  if (browse) return handleDriveBrowseTap(env, state, browse);
 
   // The callback value is "<opaqueId>:<position>|more": index.ts splits
   // callback_data on ":" into [action, workId, value], and opaqueIds are
@@ -2201,6 +2215,86 @@ export async function handleGoogleFolderSelection(
     outcome: "Active",
   });
 
+  return state;
+}
+
+/** Handle a Drive browser tap on a folder or button.
+ *  - "file", "save", "back": show unavailable message
+ *  - "open": open the selected folder as a new browse screen
+ */
+export async function handleDriveBrowseTap(
+  env: Env,
+  state: WorkState,
+  tap: { screenId: string; action: BrowseAction },
+): Promise<WorkState> {
+  const target: HatMessageTarget = {
+    chatId: state.chatId,
+    threadId: state.threadId,
+    hat: state.hat,
+    workId: state.workId,
+  };
+  const { type } = tap.action;
+
+  if (type === "file" || type === "save" || type === "back") {
+    await sendWorkspaceHatMessage(env, target, "⚠️ That button isn't available yet.");
+    return state;
+  }
+
+  if (type === "open") {
+    const index = tap.action.index;
+    // 1. Read the stored browse screen
+    const screen = await readBrowseScreen(env, state.workId, tap.screenId);
+    if (!screen) {
+      await sendWorkspaceHatMessage(env, target, "⚠️ That folder view has expired. Please start the save again.");
+      return state;
+    }
+    // 2. Get the item at the given index; validate it's a folder
+    const item = screen.items[index];
+    if (!item || item.kind !== "folder") {
+      await sendWorkspaceHatMessage(env, target, "⚠️ That folder is no longer available.");
+      return state;
+    }
+    // 3. Get the account identifier from the screen context
+    const account = screen.context.accountIdentifier;
+    if (typeof account !== "string") {
+      // Treat as expired / invalid screen
+      await sendWorkspaceHatMessage(env, target, "⚠️ That folder view has expired. Please start the save again.");
+      return state;
+    }
+    // 4. Get a valid Google access token
+    const token = await getValidGoogleAccessToken(env, account);
+    if (!token) {
+      await sendWorkspaceHatMessage(env, target, "⚠️ Could not retrieve valid credentials for account '" + account + "'. Please re-authorize via /oauth/google/start.");
+      return state;
+    }
+    // 5. List the folder contents
+    const list = await listDriveFolderContents(token, item.id);
+    if (!list.ok) {
+      const detail = list.reason === "http" && list.status !== undefined ? "HTTP " + list.status : list.reason;
+      await sendWorkspaceHatMessage(env, target, "⚠️ Could not open folder '" + item.name + "' (" + detail + ").");
+      return state;
+    }
+    // 6. Build the new browse screen
+    const newScreen: BrowseScreen = {
+      kind: "drivebrowse",
+      folderId: item.id,
+      folderName: item.name,
+      parentScreenId: tap.screenId,
+      items: list.items.slice(0, MAX_BROWSE_ITEMS),
+      truncated: list.truncated || list.items.length > MAX_BROWSE_ITEMS,
+      context: screen.context,
+    };
+    // 7. Persist the new screen
+    const saved = await saveBrowseScreen(env, state.workId, newScreen);
+    if (!saved.ok) {
+      await sendWorkspaceHatMessage(env, target, "⚠️ Could not persist the folder-selection options (storage write refused -- likely the daily KV quota), so no folder picker was sent and nothing was staged. Please retry after the quota window resets.");
+      return state;
+    }
+    // 8. Render the new browse screen
+    return renderBrowseScreen(env, state, target, saved.screenId, newScreen, { logPresented: false });
+  }
+
+  await sendWorkspaceHatMessage(env, target, "⚠️ That button isn't available yet.");
   return state;
 }
 
