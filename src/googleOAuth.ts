@@ -2251,8 +2251,29 @@ export async function handleDriveBrowseTap(
   };
   const { type } = tap.action;
 
-  if (type === "file" || type === "save") {
+  if (type === "save") {
     await sendWorkspaceHatMessage(env, target, "⚠️ That button isn't available yet.");
+    return state;
+  }
+
+  if (type === "file") {
+    const screen = await readBrowseScreen(env, state.workId, tap.screenId);
+    if (!screen) {
+      await sendWorkspaceHatMessage(env, target, "⚠️ That folder view has expired. Please start the save again.");
+      return state;
+    }
+    const item = screen.items[tap.action.index];
+    if (!item || item.kind !== "file") {
+      await sendWorkspaceHatMessage(env, target, "⚠️ That file is no longer available.");
+      return state;
+    }
+    const link = item.webViewLink;
+    const escapedName = escapeTelegramMarkdown(item.name);
+    if (typeof link === "string" && link.startsWith("https://") && !link.includes(")")) {
+      await sendWorkspaceHatMessage(env, target, `📄 *${escapedName}*\n[Open in Google Drive](${link})`);
+    } else {
+      await sendWorkspaceHatMessage(env, target, `📄 *${escapedName}*\nNo Google Drive link is available for this file.`);
+    }
     return state;
   }
 

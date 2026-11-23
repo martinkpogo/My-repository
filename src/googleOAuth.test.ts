@@ -2657,7 +2657,7 @@ test("Task 7: file, save and back taps report unavailability with zero Drive cal
     const writes = countOptionWrites(mockKv, workId);
 
     await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:f1`);
-    assert.ok(drive.texts[drive.texts.length - 1]!.includes("isn't available yet"), "file tap: expected 'isn't available yet'");
+    assert.ok(drive.texts[drive.texts.length - 1]!.includes("No Google Drive link is available for this file."), "file tap: expected 'No Google Drive link is available for this file.' (was 'isn't available yet')");
     await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:s`);
     assert.ok(drive.texts[drive.texts.length - 1]!.includes("isn't available yet"), "save tap: expected 'isn't available yet'");
     await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:b`);
@@ -3230,7 +3230,7 @@ test("Task 8: file and save taps still answer isn't available yet", async () => 
     // File tap on the opened screen.
     const fileValue = parseCallbackData(String(rowWithText(drive.pickers[1]!, "📄 notes.txt")[0].callback_data)).value;
     await handleGoogleFolderSelection(fakeEnv, browseState(workId), fileValue);
-    assert.ok(drive.texts[drive.texts.length - 1]!.includes("isn't available yet"), "file tap: expected isn't available yet");
+    assert.ok(drive.texts[drive.texts.length - 1]!.includes("No Google Drive link is available for this file."), "file tap: expected 'No Google Drive link is available for this file.' (was 'isn't available yet')");
 
     // Save tap on the opened screen.
     const saveValue = `${screenIdOf(drive.pickers[1]![0])}:s`;
@@ -3239,6 +3239,464 @@ test("Task 8: file and save taps still answer isn't available yet", async () => 
 
     assert.strictEqual(counters.driveUrls.length, beforeListing, "ZERO Drive calls for file/save taps");
     assert.strictEqual(writes(), 0, "ZERO storage writes for file/save taps");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Drive file browser (Task 9): tapping a file to get its Drive link.
+// ---------------------------------------------------------------------------
+
+test("Task 9: tapping a file sends its name and an Open in Google Drive link", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t9-a";
+  const fileId = "file-a";
+  const fileLink = "https://drive.google.com/file/d/the-file-id/view";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [
+          { id: fileId, name: "notes.txt", mimeType: "text/plain", webViewLink: fileLink },
+        ],
+      },
+    },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const beforeListing = counters.driveUrls.length;
+    const beforeNotion = counters.notion;
+    const writes = countOptionWrites(mockKv, workId);
+
+    const folderScreenId = screenIdOf(drive.pickers[0]![0]);
+    const fileValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, "📄 notes.txt")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), fileValue);
+
+    const last = drive.texts[drive.texts.length - 1]!;
+    assert.ok(last.includes("📄 *notes.txt*"), `expected file name, got: ${last}`);
+    assert.ok(last.includes(`[Open in Google Drive](${fileLink})`), `expected Drive link, got: ${last}`);
+
+    assert.strictEqual(counters.driveUrls.length, beforeListing, "ZERO Drive calls");
+    assert.strictEqual(writes(), 0, "ZERO storage writes");
+    assert.strictEqual(counters.notion, beforeNotion, "ZERO api.notion.com requests during the file tap");
+    assert.deepStrictEqual(stagedOptionKeys(mockKv, workId), [`google_option:${workId}:${folderScreenId}`], "no screen changed");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 9: a file tap makes ZERO Drive calls, ZERO storage writes and ZERO api.notion.com requests", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t9-b";
+  const fileId = "file-b";
+  const fileLink = "https://drive.google.com/file/d/another-id/view?usp=sharing";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [
+          { id: fileId, name: "report.pdf", mimeType: "application/pdf", webViewLink: fileLink },
+        ],
+      },
+    },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const baseListing = counters.driveUrls.length;
+    const beforeNotion = counters.notion;
+    const writes = countOptionWrites(mockKv, workId);
+    const folderScreenId = screenIdOf(drive.pickers[0]![0]);
+
+    const fileValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, "📄 report.pdf")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), fileValue);
+
+    assert.strictEqual(counters.driveUrls.length, baseListing, "ZERO Drive calls");
+    assert.strictEqual(writes(), 0, "ZERO storage writes");
+    assert.strictEqual(counters.notion, beforeNotion, "ZERO api.notion.com requests during the file tap");
+    assert.deepStrictEqual(stagedOptionKeys(mockKv, workId), [`google_option:${workId}:${folderScreenId}`], "screen unchanged");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 9: after a file tap the same screen still works: tapping a folder opens it", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t9-c";
+  const fileId = "file-c";
+  const innerFolderId = "folder-inner-c";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [
+          { id: fileId, name: "data.csv", mimeType: "text/csv", webViewLink: "https://drive.google.com/file/d/csv/view" },
+          { id: innerFolderId, name: "Inner folder", mimeType: "application/vnd.google-apps.folder" },
+        ],
+      },
+    },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const topScreenId = screenIdOf(drive.pickers[0]![0]);
+
+    // File tap first.
+    const fileValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, "📄 data.csv")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), fileValue);
+
+    // Tapping a folder on the same screen still opens it.
+    const folderValue = parseCallbackData(
+      String(rowWithText(drive.pickers[0]!, "📁 Inner folder")[0].callback_data),
+    ).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), folderValue);
+
+    const openedText = drive.texts[drive.texts.length - 1]!;
+    assert.ok(openedText.includes("📂 *Inner folder*"), `inner folder not opened, got: ${openedText}`);
+    const openedScreenId = screenIdOf(drive.pickers[drive.pickers.length - 1]![0]);
+    const opened = storedScreen(mockKv, workId, openedScreenId);
+    assert.strictEqual(opened.folderId, innerFolderId);
+    assert.strictEqual(opened.parentScreenId, topScreenId);
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 9: a file with no webViewLink -> No Google Drive link is available for this file", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t9-d";
+  const fileId = "file-d";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: fileId, name: "orphan.txt", mimeType: "text/plain" }] } },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const beforeDrive = counters.driveUrls.length;
+    const fileValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, "📄 orphan.txt")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), fileValue);
+
+    const last = drive.texts[drive.texts.length - 1]!;
+    assert.ok(last.includes("📄 *orphan.txt*"), `expected file name, got: ${last}`);
+    assert.ok(last.includes("No Google Drive link is available for this file."), `expected no-link message, got: ${last}`);
+    assert.ok(!last.includes("Open in Google Drive"), `no link should appear, got: ${last}`);
+    assert.strictEqual(counters.driveUrls.length, beforeDrive, "ZERO Drive calls");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 9: unsafe links give the No Google Drive link message", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t9-e";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [
+          { id: "file-unsafe-1", name: "http link.txt", mimeType: "text/plain", webViewLink: "http://evil.example.com/x" },
+          { id: "file-unsafe-2", name: "paren link.txt", mimeType: "text/plain", webViewLink: "https://drive.google.com/file/d/x)y/view" },
+        ],
+      },
+    },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+
+    const httpValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, "📄 http link.txt")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), httpValue);
+    const httpText = drive.texts[drive.texts.length - 1]!;
+    assert.ok(httpText.includes("No Google Drive link is available for this file."), `http link: expected no-link message, got: ${httpText}`);
+    assert.ok(!httpText.includes("http://evil"), `bad http link must not appear, got: ${httpText}`);
+
+    const parenValue = parseCallbackData(String(rowWithText(drive.pickers[0]!, "📄 paren link.txt")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), parenValue);
+    const parenText = drive.texts[drive.texts.length - 1]!;
+    assert.ok(parenText.includes("No Google Drive link is available for this file."), `paren link: expected no-link message, got: ${parenText}`);
+    assert.ok(!parenText.includes(")y"), `bad paren link must not appear, got: ${parenText}`);
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 9: a file named Q4_plan *draft*.pdf escapes the name", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t9-f";
+  const fileId = "file-f";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [{ id: fileId, name: "Q4_plan *draft*.pdf", mimeType: "application/pdf", webViewLink: "https://drive.google.com/file/d/q4/view" }],
+      },
+    },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const fileValue = parseCallbackData(
+      String(rowWithText(drive.pickers[0]!, "📄 Q4_plan *draft*.pdf")[0].callback_data),
+    ).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), fileValue);
+
+    const last = drive.texts[drive.texts.length - 1]!;
+    assert.ok(last.includes("Q4\\_plan \\*draft\\*.pdf"), `escaped name missing, got: ${last}`);
+    assert.ok(last.includes(`[Open in Google Drive](https://drive.google.com/file/d/q4/view)`), `Drive link missing, got: ${last}`);
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 9: a folder index and an out-of-range index -> That file is no longer available", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t9-g";
+  const folderId = "folder-g";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [
+          { id: folderId, name: "G folder", mimeType: "application/vnd.google-apps.folder" },
+        ],
+      },
+    },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const topScreenId = screenIdOf(drive.pickers[0]![0]);
+    const baseListing = counters.driveUrls.length;
+
+    // Index pointing at a folder (kind !== file): build a "file" callback for index 0.
+    const folderFileCallback = buildBrowseCallback(workId, topScreenId, { type: "file", index: 0 })!;
+    const folderValue = parseCallbackData(folderFileCallback).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), folderValue);
+    const folderText = drive.texts[drive.texts.length - 1]!;
+    assert.ok(folderText.includes("That file is no longer available."), `folder index: expected not-available, got: ${folderText}`);
+
+    // Out-of-range index.
+    const outOfRangeValue = `${topScreenId}:f99`;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), outOfRangeValue);
+    const rangeText = drive.texts[drive.texts.length - 1]!;
+    assert.ok(rangeText.includes("That file is no longer available."), `out-of-range: expected not-available, got: ${rangeText}`);
+
+    assert.strictEqual(counters.driveUrls.length, baseListing, "ZERO Drive calls");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 9: an expired screen id -> has expired", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-t9-h";
+  const folderId = "folder-h";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const counters = { notion: 0, listing: 0, driveUrls: [] as string[] };
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [{ id: folderId, name: "H folder", mimeType: "application/vnd.google-apps.folder" }],
+      },
+    },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, counters);
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const topScreenId = screenIdOf(drive.pickers[0]![0]);
+    const beforeDrive = counters.driveUrls.length;
+
+    // Expire the tapped screen.
+    mockKv._rawStore.delete(`google_option:${workId}:${topScreenId}`);
+
+    const fileValue = `${topScreenId}:f0`;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), fileValue);
+
+    const last = drive.texts[drive.texts.length - 1]!;
+    assert.ok(last.includes("has expired"), `expected has expired, got: ${last}`);
+    assert.strictEqual(counters.driveUrls.length, beforeDrive, "ZERO Drive calls");
+  } finally {
+    globalThis.fetch = realFetch;
+    drive.restore();
+  }
+});
+
+test("Task 9: a file inside an opened subfolder sends its link", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t9-i";
+  const folderId = "folder-i";
+  const fileId = "file-i";
+  const fileLink = "https://drive.google.com/file/d/subfile/view";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const pickers: any[][][] = [];
+  const texts: string[] = [];
+  let subListingCalls = 0;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const s = String(url);
+    if (s.includes("googleapis.com/drive/v3/files/root")) {
+      return new Response(JSON.stringify({ id: "root-id", name: "My Drive" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (s.includes("googleapis.com/drive/v3/files") && !s.includes("/root")) {
+      const q = new URL(s).searchParams.get("q") ?? "";
+      if (q.includes(`'${folderId}' in parents`)) {
+        subListingCalls++;
+        return new Response(JSON.stringify({ files: [{ id: fileId, name: "notes.txt", mimeType: "text/plain", webViewLink: fileLink }] }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (q === "'root-id' in parents and trashed=false") {
+        return new Response(JSON.stringify({ files: [{ id: folderId, name: "I folder", mimeType: "application/vnd.google-apps.folder" }] }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ files: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (s.includes("api.telegram.org")) {
+      const body = JSON.parse(String(init?.body));
+      texts.push(String(body.text ?? ""));
+      if (body.reply_markup?.inline_keyboard) pickers.push(body.reply_markup.inline_keyboard);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof globalThis.fetch;
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+
+    // Open the subfolder.
+    const openValue = parseCallbackData(String(rowWithText(pickers[0]!, "📁 I folder")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), openValue);
+    assert.strictEqual(subListingCalls, 1, "subfolder listing happened once");
+
+    // Tap the file on the subfolder screen (parsed from its message).
+    const subFileValue = parseCallbackData(String(rowWithText(pickers[1]!, "📄 notes.txt")[0].callback_data)).value;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), subFileValue);
+
+    const last = texts[texts.length - 1]!;
+    assert.ok(last.includes("📄 *notes.txt*"), `subfolder file name missing, got: ${last}`);
+    assert.ok(last.includes(`[Open in Google Drive](${fileLink})`), `subfolder Drive link missing, got: ${last}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("Task 9: save taps still answer isn't available yet", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-t9-j";
+  const fileId = "file-j";
+  await persistGoogleTokens(
+    fakeEnv,
+    { access_token: "token-browse", refresh_token: "refresh-browse", expires_in: 3600 },
+    "user@enig.com",
+  );
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId);
+
+  const realFetch = globalThis.fetch;
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [{ id: fileId, name: "link.txt", mimeType: "text/plain", webViewLink: "https://drive.google.com/file/d/l/view" }],
+      },
+    },
+  });
+  const driveFetch = globalThis.fetch;
+  globalThis.fetch = notionAwareFetch(driveFetch, { notion: 0, listing: 0, driveUrls: [] });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const saveValue = `${screenIdOf(drive.pickers[0]![0])}:s`;
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), saveValue);
+    assert.ok(drive.texts[drive.texts.length - 1]!.includes("isn't available yet"), "save tap: expected isn't available yet");
   } finally {
     globalThis.fetch = realFetch;
     drive.restore();
