@@ -37,8 +37,10 @@ import {
 } from "./googleOAuth";
 import { buildProposalDocLayout } from "./proposalRedline";
 import { parseCallbackData } from "./telegramCallbackData";
-import { buildBrowseCallback, parseBrowseValue, saveBrowseScreen } from "./googleDriveBrowseScreen";
+import { buildBrowseCallback, parseBrowseValue, readBrowseScreen, saveBrowseScreen } from "./googleDriveBrowseScreen";
 import type { WorkState } from "./types";
+import { readDeliveryConfirmation } from "./outputDelivery";
+import { escapeTelegramMarkdown } from "./runtime/workStatus";
 
 function createMockKv() {
   const store = new Map<string, { value: string; expirationTtl?: number }>();
@@ -4299,10 +4301,381 @@ test("R2-3: a '<screenId>:r0' tap answers 'isn't available yet', with ZERO Drive
     const value = `${saved.screenId}:r0`;
     const updatedState = await handleGoogleFolderSelection(fakeEnv, state, value);
     assert.strictEqual(updatedState, state, "state is unchanged");
-    assert.ok(sentText.includes("isn't available yet"), `expected 'isn't available yet', got: ${sentText}`);
+    assert.ok(sentText.includes("That file is no longer available."), `expected 'That file is no longer available.', got: ${sentText}`);
     assert.strictEqual(driveCalls, 0, "ZERO Drive calls");
     assert.strictEqual(writes(), 0, "ZERO storage writes");
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R2-5: Replace a Doc - button and confirmation
+// ---------------------------------------------------------------------------
+
+test("R2-5: delivery flow, tap the Google Doc -> the card has '♻️ Replace with this output' with callback googlefolder:<workId>:<screenId>:r<index>", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-r2-5-a";
+  await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { delivery: true, docType: "doc", title: "Q3 Plan", content: "body" });
+
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [
+          { id: "doc-a", name: "Q3 Plan", mimeType: "application/vnd.google-apps.document", webViewLink: "https://docs.google.com/document/d/doc-a/edit" },
+          { id: "pdf-a", name: "report.pdf", mimeType: "application/pdf", webViewLink: "https://drive.google.com/file/d/pdf-a/view" },
+          { id: "sheet-a", name: "tracker", mimeType: "application/vnd.google-apps.spreadsheet", webViewLink: "https://docs.google.com/spreadsheets/d/sheet-a/edit" },
+        ],
+      },
+    },
+  });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    assert.strictEqual(drive.pickers.length, 1, "exactly one top-screen picker");
+    const screenId = screenIdOf(drive.pickers[0]![0]);
+    const stored = storedScreen(mockKv, workId, screenId);
+    assert.strictEqual(stored.items.length, 3, "Doc, PDF and Sheet all listed");
+
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:f0`);
+    const cardText = drive.texts[drive.texts.length - 1]!;
+    assert.ok(cardText.includes("📄 *Q3 Plan*"), `file card text missing, got: ${cardText}`);
+    assert.ok(cardText.includes("[Open in Google Drive]"), `file card link missing, got: ${cardText}`);
+    const keyboard = drive.pickers[drive.pickers.length - 1]!;
+    assert.strictEqual(keyboard.length, 1, "the file card is one button row");
+    assert.strictEqual(keyboard[0]![0].text, "♻️ Replace with this output", "Replace button label");
+    assert.match(String(keyboard[0]![0].callback_data), new RegExp(`^googlefolder:${workId}:${screenId}:r0$`), "Replace button callback");
+    assert.ok(Buffer.byteLength(String(keyboard[0]![0].callback_data)) <= 64, "Replace callback fits 64 bytes");
+  } finally {
+    drive.restore();
+  }
+});
+
+test("R2-5: the normal Doc flow and the smoke flow -> no Replace button", async () => {
+  const listing = {
+    body: {
+      files: [{ id: "doc-b", name: "Q3 Plan", mimeType: "application/vnd.google-apps.document", webViewLink: "https://docs.google.com/document/d/doc-b/edit" }],
+    },
+  };
+
+  // normal flow: no delivery flag
+  {
+    const { fakeEnv, mockKv } = createFakeEnv();
+    const workId = "work-r2-5-b-normal";
+    await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+    const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { docType: "doc", title: "Q3 Plan", content: "body" });
+    const drive = installBrowseFake({ listing });
+    try {
+      await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+      const screenId = screenIdOf(drive.pickers[0]![0]);
+      storedScreen(mockKv, workId, screenId);
+      await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:f0`);
+      assert.ok(!drive.texts.some((t) => t.includes("Replace with this output")), "normal flow must not offer Replace");
+      assert.ok(!drive.pickers.some((rows) => rows.some((row) => row.some((b) => b.text === "♻️ Replace with this output"))), "normal flow must not show a Replace button");
+    } finally {
+      drive.restore();
+    }
+  }
+
+  // smoke flow: smoke flag instead of delivery
+  {
+    const { fakeEnv, mockKv } = createFakeEnv();
+    const workId = "work-r2-5-b-smoke";
+    await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+    const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { smoke: true });
+    const drive = installBrowseFake({ listing });
+    try {
+      await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+      const screenId = screenIdOf(drive.pickers[0]![0]);
+      storedScreen(mockKv, workId, screenId);
+      await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:f0`);
+      assert.ok(!drive.texts.some((t) => t.includes("Replace with this output")), "smoke flow must not offer Replace");
+      assert.ok(!drive.pickers.some((rows) => rows.some((row) => row.some((b) => b.text === "♻️ Replace with this output"))), "smoke flow must not show a Replace button");
+    } finally {
+      drive.restore();
+    }
+  }
+});
+
+test("R2-5: delivery flow, tap the PDF and the Sheet -> no Replace button", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-r2-5-c";
+  await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { delivery: true, docType: "doc", title: "Q3 Plan", content: "body" });
+
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [
+          { id: "doc-c", name: "Q3 Plan", mimeType: "application/vnd.google-apps.document", webViewLink: "https://docs.google.com/document/d/doc-c/edit" },
+          { id: "pdf-c", name: "report.pdf", mimeType: "application/pdf", webViewLink: "https://drive.google.com/file/d/pdf-c/view" },
+          { id: "sheet-c", name: "tracker", mimeType: "application/vnd.google-apps.spreadsheet", webViewLink: "https://docs.google.com/spreadsheets/d/sheet-c/edit" },
+        ],
+      },
+    },
+  });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const screenId = screenIdOf(drive.pickers[0]![0]);
+    storedScreen(mockKv, workId, screenId);
+
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:f1`);
+    assert.ok(!drive.texts.some((t) => t.includes("Replace with this output")), "PDF must not offer Replace");
+    assert.ok(!drive.pickers.some((rows) => rows.some((row) => row.some((b) => b.text === "♻️ Replace with this output"))), "PDF must not show a Replace button");
+
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:f2`);
+    assert.ok(!drive.texts.some((t) => t.includes("Replace with this output")), "Sheet must not offer Replace");
+    assert.ok(!drive.pickers.some((rows) => rows.some((row) => row.some((b) => b.text === "♻️ Replace with this output"))), "Sheet must not show a Replace button");
+  } finally {
+    drive.restore();
+  }
+});
+
+test("R2-5: tap Replace -> confirmation naming the file and folder, outputdelivery buttons, replace_confirm option staged, ZERO Drive calls, screen still readable", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-r2-5-d";
+  await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { delivery: true, docType: "doc", title: "Q3 *Plan* draft", content: "body" });
+
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [{ id: "doc-d", name: "Q3 *Plan* draft", mimeType: "application/vnd.google-apps.document", webViewLink: "https://docs.google.com/document/d/doc-d/edit" }],
+      },
+    },
+  });
+
+    try {
+      await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+      const screenId = screenIdOf(drive.pickers[0]![0]);
+
+      let driveCalls = 0;
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = ((url: string, init?: RequestInit) => {
+        if (String(url).includes("googleapis.com/drive/v3/files")) driveCalls++;
+        return realFetch(url, init);
+      }) as typeof fetch;
+      try {
+        await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:r0`);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+      assert.strictEqual(driveCalls, 0, "ZERO Drive calls for the Replace tap");
+
+      const message = drive.texts[drive.texts.length - 1]!;
+      assert.ok(message.includes("♻️ *Replace a Google Doc* -- confirm"), `confirmation heading missing, got: ${message}`);
+      assert.ok(message.includes(`*File*: ${escapeTelegramMarkdown("Q3 *Plan* draft")}`), `escaped file name missing, got: ${message}`);
+      assert.ok(message.includes("*Folder*: My Drive"), `folder name missing, got: ${message}`);
+      assert.ok(message.includes("Replace it?"), `confirmation question missing, got: ${message}`);
+
+      const keyboard = drive.pickers[drive.pickers.length - 1]!;
+      assert.strictEqual(keyboard.length, 1, "one button row");
+      const yes = keyboard[0]![0];
+      const no = keyboard[0]![1];
+      assert.strictEqual(yes.text, "✅ Yes, replace", "Yes button label");
+      assert.strictEqual(no.text, "❌ No", "No button label");
+      const yesMatch = String(yes.callback_data).match(/^outputdelivery:(work-r2-5-d):([a-z0-9]{8})$/);
+      assert.ok(yesMatch, `Yes callback is outputdelivery:<workId>:<8-char id>, got: ${yes.callback_data}`);
+      const optionId = yesMatch![2];
+      assert.strictEqual(String(no.callback_data), `outputdelivery:${workId}:keep`, "No callback is outputdelivery:<workId>:keep");
+      assert.ok(Buffer.byteLength(String(yes.callback_data)) <= 64, "Yes callback fits 64 bytes");
+      assert.ok(Buffer.byteLength(String(no.callback_data)) <= 64, "No callback fits 64 bytes");
+
+      const raw = await mockKv.get(`google_option:${workId}:${optionId}`);
+      assert.ok(raw, "the replace_confirm option was stored");
+      const option = JSON.parse(raw);
+      assert.strictEqual(option.kind, "replace_confirm");
+      assert.strictEqual(option.delivery, true);
+      assert.strictEqual(option.accountIdentifier, "user@enig.com");
+      assert.strictEqual(option.documentId, "doc-d");
+      assert.strictEqual(option.documentName, "Q3 *Plan* draft");
+      assert.strictEqual(option.folderName, "My Drive");
+
+      const screen = await readBrowseScreen(fakeEnv, workId, screenId);
+      assert.ok(screen, "the browse screen can still be read after the Replace tap");
+      assert.strictEqual(screen.folderName, "My Drive");
+    } finally {
+      drive.restore();
+    }
+  });
+
+test("R2-5: passing the stored replace_confirm option to readDeliveryConfirmation gives action 'replace' with the same fields", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-r2-5-e";
+  await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { delivery: true, docType: "doc", title: "Q3 Plan", content: "body" });
+
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: "doc-e", name: "Review Doc", mimeType: "application/vnd.google-apps.document", webViewLink: "https://docs.google.com/document/d/doc-e/edit" }] } },
+  });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const screenId = screenIdOf(drive.pickers[0]![0]);
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:r0`);
+
+    let replaceOption: Record<string, unknown> | null = null;
+    for (const key of stagedOptionKeys(mockKv, workId)) {
+      const parsed = JSON.parse((await mockKv.get(key))!);
+      if (parsed.kind === "replace_confirm") replaceOption = parsed;
+    }
+    assert.ok(replaceOption, "a replace_confirm option was staged");
+    const confirmation = readDeliveryConfirmation(replaceOption);
+    assert.strictEqual(confirmation?.action, "replace");
+    if (confirmation?.action === "replace") {
+      assert.strictEqual(confirmation.accountIdentifier, "user@enig.com");
+      assert.strictEqual(confirmation.documentId, "doc-e");
+      assert.strictEqual(confirmation.documentName, "Review Doc");
+      assert.strictEqual(confirmation.folderName, "My Drive");
+    }
+  } finally {
+    drive.restore();
+  }
+});
+
+test("R2-5: guards -> a folder index gives 'no longer available', a PDF index gives 'Only Google Docs can be replaced.', a normal-flow screen gives 'only available when saving an approved output', an expired screen gives 'has expired'; each makes ZERO storage writes", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+
+  const listing = {
+    body: {
+      files: [
+        { id: "folder-f", name: "Sub", mimeType: "application/vnd.google-apps.folder" },
+        { id: "pdf-f", name: "report.pdf", mimeType: "application/pdf", webViewLink: "https://drive.google.com/file/d/pdf-f/view" },
+        { id: "doc-f", name: "Q3 Plan", mimeType: "application/vnd.google-apps.document", webViewLink: "https://docs.google.com/document/d/doc-f/edit" },
+      ],
+    },
+  };
+
+  // delivery flow screen: folder index -> "no longer available", PDF index -> "Only Google Docs can be replaced."
+  {
+    const workId = "work-r2-5-f-delivery";
+    const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { delivery: true, docType: "doc", title: "Q3 Plan", content: "body" });
+    const drive = installBrowseFake({ listing });
+    try {
+      await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+      const screenId = screenIdOf(drive.pickers[0]![0]);
+      storedScreen(mockKv, workId, screenId);
+
+      const writes = countOptionWrites(mockKv, workId);
+      await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:r0`);
+      assert.ok(drive.texts[drive.texts.length - 1]!.includes("That file is no longer available."), `folder guard message missing, got: ${drive.texts[drive.texts.length - 1]}`);
+      assert.strictEqual(writes(), 0, "folder guard: ZERO storage writes");
+
+      const writes2 = countOptionWrites(mockKv, workId);
+      await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:r2`);
+      assert.ok(drive.texts[drive.texts.length - 1]!.includes("Only Google Docs can be replaced."), `PDF guard message missing, got: ${drive.texts[drive.texts.length - 1]}`);
+      assert.strictEqual(writes2(), 0, "PDF guard: ZERO storage writes");
+    } finally {
+      drive.restore();
+    }
+  }
+
+  // normal-flow screen: no delivery flag -> "only available when saving an approved output"
+  {
+    const workId = "work-r2-5-f-normal";
+    const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { docType: "doc", title: "Q3 Plan", content: "body" });
+    const drive = installBrowseFake({ listing });
+    try {
+      await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+      const screenId = screenIdOf(drive.pickers[0]![0]);
+      storedScreen(mockKv, workId, screenId);
+
+      const writes = countOptionWrites(mockKv, workId);
+      await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:r1`);
+      assert.ok(drive.texts[drive.texts.length - 1]!.includes("only available when saving an approved output"), `delivery guard message missing, got: ${drive.texts[drive.texts.length - 1]}`);
+      assert.strictEqual(writes(), 0, "delivery guard: ZERO storage writes");
+    } finally {
+      drive.restore();
+    }
+  }
+
+  // expired screen: unknown screenId -> "has expired"
+  {
+    const workId = "work-r2-5-f-expired";
+    await stageBrowseAccount(fakeEnv, workId, { delivery: true, docType: "doc", title: "Q3 Plan", content: "body" });
+    const drive = installBrowseFake({ listing });
+    try {
+      const writes = countOptionWrites(mockKv, workId);
+      await handleGoogleFolderSelection(fakeEnv, browseState(workId), "deadbeef:r0");
+      assert.ok(drive.texts[drive.texts.length - 1]!.includes("has expired"), `expired guard message missing, got: ${drive.texts[drive.texts.length - 1]}`);
+      assert.strictEqual(writes(), 0, "expired guard: ZERO storage writes");
+    } finally {
+      drive.restore();
+    }
+  }
+});
+
+test("R2-5: storage refused -> the 'Could not persist the replace confirmation' message, and no confirmation buttons are sent", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  const workId = "work-r2-5-g";
+  await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { delivery: true, docType: "doc", title: "Q3 Plan", content: "body" });
+
+  const drive = installBrowseFake({
+    listing: { body: { files: [{ id: "doc-g", name: "Q3 Plan", mimeType: "application/vnd.google-apps.document", webViewLink: "https://docs.google.com/document/d/doc-g/edit" }] } },
+  });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const screenId = screenIdOf(drive.pickers[0]![0]);
+    storedScreen(mockKv, workId, screenId);
+    const baseKeyCount = stagedOptionKeys(mockKv, workId).length;
+
+    // Refuse every google_option: write while the Replace tap runs.
+    const originalPut = mockKv.put;
+    mockKv.put = async () => {
+      throw new Error("storage write refused -- likely the daily KV quota");
+    };
+    const writes = countOptionWrites(mockKv, workId);
+    try {
+      await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:r0`);
+    } finally {
+      mockKv.put = originalPut;
+    }
+
+    const message = drive.texts[drive.texts.length - 1]!;
+    assert.ok(message.includes("Could not persist the replace confirmation (storage write refused -- likely the daily KV quota). Nothing was changed."), `quota message missing, got: ${message}`);
+    assert.strictEqual(writes(), 0, "storage-refused tap: ZERO google_option: writes");
+    assert.strictEqual(stagedOptionKeys(mockKv, workId).length, baseKeyCount, "no new google_option: record after the refused write");
+    assert.ok(!drive.pickers.some((rows) => rows.some((row) => row.some((b) => String(b.callback_data).startsWith("outputdelivery:")))), "no confirmation buttons were sent");
+  } finally {
+    drive.restore();
+  }
+});
+
+test("R2-5: every button callback in the file card and the confirmation is at most 64 bytes", async () => {
+  const { fakeEnv } = createFakeEnv();
+  const workId = "work-r2-5-h";
+  await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+  const opaqueOptionId = await stageBrowseAccount(fakeEnv, workId, { delivery: true, docType: "doc", title: "Q3 Plan", content: "body" });
+
+  const longName = "A".repeat(120);
+  const drive = installBrowseFake({
+    listing: {
+      body: {
+        files: [{ id: "doc-h", name: longName, mimeType: "application/vnd.google-apps.document", webViewLink: "https://docs.google.com/document/d/doc-h/edit" }],
+      },
+    },
+  });
+
+  try {
+    await handleGoogleAccountSelection(fakeEnv, browseState(workId), opaqueOptionId);
+    const screenId = screenIdOf(drive.pickers[0]![0]);
+
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:f0`);
+    const replaceButton = drive.pickers[drive.pickers.length - 1]![0]![0];
+    assert.ok(Buffer.byteLength(String(replaceButton.callback_data)) <= 64, `file-card Replace callback too long: ${Buffer.byteLength(String(replaceButton.callback_data))}`);
+
+    await handleGoogleFolderSelection(fakeEnv, browseState(workId), `${screenId}:r0`);
+    const last = drive.pickers[drive.pickers.length - 1]![0];
+    const yes = last[0];
+    const no = last[1];
+    assert.ok(Buffer.byteLength(String(yes.callback_data)) <= 64, `Yes callback too long: ${Buffer.byteLength(String(yes.callback_data))}`);
+    assert.ok(Buffer.byteLength(String(no.callback_data)) <= 64, `No callback too long: ${Buffer.byteLength(String(no.callback_data))}`);
+  } finally {
+    drive.restore();
   }
 });

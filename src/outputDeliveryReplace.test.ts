@@ -443,3 +443,12 @@ test("R2-4: 'dismiss' still clears state.outputDelivery (unchanged)", async (t) 
   assert.equal(next.outputDelivery, undefined, "'dismiss' clears the captured output");
   assert.equal(googleCalls(calls).length, 0, "no Google request for 'dismiss'");
 });
+
+// ---------------------------------------------------------------------------
+// R2-5: a delivery_confirm option naming a Doc is never read as a replace
+// ---------------------------------------------------------------------------
+
+test("R2-5: readDeliveryConfirmation({ kind: 'delivery_confirm', delivery: true, accountIdentifier: 'a', documentId: 'd' }) returns null", () => {
+  const neither = readDeliveryConfirmation({ kind: "delivery_confirm", delivery: true, accountIdentifier: "a", documentId: "d" });
+  assert.equal(neither, null, "a save-as-new confirmation with a Doc id but no folder is never read as a replace");
+});
