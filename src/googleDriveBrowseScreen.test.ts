@@ -268,3 +268,75 @@ test("parseBrowseValue accepts the valid codes", async () => {
     );
   }
 });
+
+test("R2-3: build -> parseCallbackData -> parseBrowseValue round-trips replace at index 0 and 999", async () => {
+  for (const index of [0, 999]) {
+    const action: BrowseAction = { type: "replace", index };
+    const callback = buildBrowseCallback(WORK_ID, SCREEN_ID, action);
+    assert.strictEqual(typeof callback, "string", `callback exists for replace ${index}`);
+    if (!callback) return;
+    assert.strictEqual(
+      callback,
+      `googlefolder:${WORK_ID}:${SCREEN_ID}:r${index}`,
+      `exact callback shape for replace ${index}`,
+    );
+    const parsed = parseCallbackData(callback);
+    assert.strictEqual(parsed.action, "googlefolder", "outer action is googlefolder");
+    assert.strictEqual(parsed.workId, WORK_ID, "workId carried through");
+    const browse = parseBrowseValue(parsed.value);
+    assert.deepStrictEqual(
+      browse,
+      { screenId: SCREEN_ID, action },
+      `round-trip of replace ${index}`,
+    );
+  }
+});
+
+test("R2-3: parseBrowseValue rejects malformed replace codes", async () => {
+  for (const bad of [
+    "ab12cd34:r",
+    "ab12cd34:r07",
+    "ab12cd34:r1000",
+    "ab12cd34:R1",
+    "ab12cd34:x1",
+  ]) {
+    assert.strictEqual(parseBrowseValue(bad), null, `rejects ${JSON.stringify(bad)}`);
+  }
+});
+
+test("R2-3: buildBrowseCallback returns null for replace index -1 and 1000", async () => {
+  assert.strictEqual(
+    buildBrowseCallback(WORK_ID, SCREEN_ID, { type: "replace", index: -1 }),
+    null,
+    "replace index -1 -> null",
+  );
+  assert.strictEqual(
+    buildBrowseCallback(WORK_ID, SCREEN_ID, { type: "replace", index: 1000 }),
+    null,
+    "replace index 1000 -> null",
+  );
+});
+
+test("R2-3: open, file, save and back still round-trip exactly as before", async () => {
+  const actions: BrowseAction[] = [
+    { type: "open", index: 0 },
+    { type: "open", index: 999 },
+    { type: "file", index: 7 },
+    { type: "save" },
+    { type: "back" },
+  ];
+  for (const action of actions) {
+    const callback = buildBrowseCallback(WORK_ID, SCREEN_ID, action);
+    assert.strictEqual(typeof callback, "string", `callback exists for ${JSON.stringify(action)}`);
+    if (!callback) return;
+    const parsed = parseCallbackData(callback);
+    assert.strictEqual(parsed.action, "googlefolder", "outer action is googlefolder");
+    assert.strictEqual(parsed.workId, WORK_ID, "workId carried through");
+    const browse = parseBrowseValue(parsed.value);
+    assert.deepStrictEqual(
+      browse,
+      { screenId: SCREEN_ID, action },
+      `round-trip of ${JSON.stringify(action)}`,
+    );
+  }
+});

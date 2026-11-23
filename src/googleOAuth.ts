@@ -2174,6 +2174,11 @@ export async function handleDriveBrowseTap(
   };
   const { type } = tap.action;
 
+  if (type === "replace") {
+    await sendWorkspaceHatMessage(env, target, "⚠️ That button isn't available yet.");
+    return state;
+  }
+
   if (type === "save") {
     const screen = await readBrowseScreen(env, state.workId, tap.screenId);
     if (!screen) {

@@ -4259,3 +4259,50 @@ test("Task 10: save from level 1, then Back on the level-1 screen's old message 
     drive.restore();
   }
 });
+
+test("R2-3: a '<screenId>:r0' tap answers 'isn't available yet', with ZERO Drive calls and ZERO storage writes", async () => {
+  const { fakeEnv, mockKv } = createFakeEnv();
+  await persistGoogleTokens(fakeEnv, { access_token: "tok", refresh_token: "r", expires_in: 3600 }, "user@enig.com");
+  const workId = "work-r2-3-e";
+  const state: WorkState = {
+    workId,
+    chatId: 1,
+    stage: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  let driveCalls = 0;
+  let sentText = "";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const s = String(url);
+    if (s.includes("api.telegram.org")) {
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      sentText = body?.text ?? "";
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    if (s.includes("googleapis.com/drive/v3/files")) driveCalls++;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const saved = await saveBrowseScreen(fakeEnv, workId, {
+      kind: "drivebrowse",
+      folderId: "folder-999",
+      folderName: "Brand Assets",
+      items: [],
+      truncated: false,
+      context: { accountIdentifier: "user@enig.com", title: "x", content: "y" },
+    });
+    assert.strictEqual(saved.ok, true);
+    const writes = countOptionWrites(mockKv, workId);
+    const value = `${saved.screenId}:r0`;
+    const updatedState = await handleGoogleFolderSelection(fakeEnv, state, value);
+    assert.strictEqual(updatedState, state, "state is unchanged");
+    assert.ok(sentText.includes("isn't available yet"), `expected 'isn't available yet', got: ${sentText}`);
+    assert.strictEqual(driveCalls, 0, "ZERO Drive calls");
+    assert.strictEqual(writes(), 0, "ZERO storage writes");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

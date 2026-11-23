@@ -35,6 +35,7 @@ export interface BrowseScreen {
 export type BrowseAction =
   | { type: "open"; index: number } // code "o<index>" -- open a folder
   | { type: "file"; index: number } // code "f<index>" -- tap a file
+  | { type: "replace"; index: number } // code "r<index>" -- replace a Doc
   | { type: "save" } // code "s"
   | { type: "back" }; // code "b"
 
@@ -133,12 +134,12 @@ export function buildBrowseCallback(
   action: BrowseAction,
 ): string | null {
   let code: string;
-  if (action.type === "open" || action.type === "file") {
+  if (action.type === "open" || action.type === "file" || action.type === "replace") {
     const index = action.index;
     if (!Number.isInteger(index) || index < 0 || index > 999) return null;
     // String(index) of an in-range integer is canonical (no leading zeros),
     // so the produced code always parses back.
-    code = `${action.type === "open" ? "o" : "f"}${index}`;
+    code = `${action.type === "open" ? "o" : action.type === "file" ? "f" : "r"}${index}`;
   } else {
     code = action.type === "save" ? "s" : "b";
   }
@@ -162,12 +163,12 @@ export function parseBrowseValue(
 
   const letter = code[0];
   const rest = code.slice(1);
-  if (letter !== "o" && letter !== "f") return null;
+  if (letter !== "o" && letter !== "f" && letter !== "r") return null;
   if (!INDEX_PATTERN.test(rest)) return null;
   return {
     screenId,
     action: {
-      type: letter === "o" ? "open" : "file",
+      type: letter === "o" ? "open" : letter === "f" ? "file" : "replace",
       index: Number(rest), // 0-999, guaranteed by INDEX_PATTERN
     },
   };
