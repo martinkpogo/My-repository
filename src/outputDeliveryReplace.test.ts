@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 
 import type { Env, ExternalToolOperationRecord, WorkState } from "./types";
-import { confirmOutputDelivery, confirmOutputDeliveryReplace } from "./outputDelivery";
+import { confirmOutputDelivery, confirmOutputDeliveryReplace, handleOutputDeliveryCallback, readDeliveryConfirmation } from "./outputDelivery";
 import {
   SHARED_OUTPUT_DELIVERY_OPERATION_ID,
   SHARED_OUTPUT_REPLACE_OPERATION_ID,
@@ -355,4 +355,91 @@ test("invokeTool update contract: bound proof, no title or folder_id in the inpu
   const directBody = batchUpdates(calls)[0].body as { requests?: unknown[] };
   const directText = (directBody.requests?.[0] as { insertText?: { text?: string } } | undefined)?.insertText?.text;
   assert.equal(directText, "direct invoke input");
+});
+
+// ---------------------------------------------------------------------------
+// R2-4: confirmation handling for Replace (No keeps the output)
+// ---------------------------------------------------------------------------
+
+test("R2-4: readDeliveryConfirmation returns 'create' with the same fields for a valid delivery_confirm option, and falls back to folderId for a missing folderName", () => {
+  const create = readDeliveryConfirmation({ kind: "delivery_confirm", delivery: true, accountIdentifier: ACCOUNT, folderId: "folder-1", folderName: "Reports Folder" });
+  assert.equal(create?.action, "create");
+  if (create?.action === "create") {
+    assert.equal(create.accountIdentifier, ACCOUNT);
+    assert.equal(create.folderId, "folder-1");
+    assert.equal(create.folderName, "Reports Folder");
+  }
+  const fallback = readDeliveryConfirmation({ kind: "delivery_confirm", delivery: true, accountIdentifier: ACCOUNT, folderId: "folder-1" });
+  assert.equal(fallback?.action, "create");
+  if (fallback?.action === "create") assert.equal(fallback.folderName, "folder-1", "missing folderName falls back to folderId");
+});
+
+test("R2-4: readDeliveryConfirmation returns null for each create input session.ts rejects today: null, wrong kind, delivery not true, missing accountIdentifier, missing folderId", () => {
+  const rejected = [
+    null,
+    { kind: "other", delivery: true, accountIdentifier: ACCOUNT, folderId: "folder-1" },
+    { kind: "delivery_confirm", delivery: false, accountIdentifier: ACCOUNT, folderId: "folder-1" },
+    { kind: "delivery_confirm", delivery: true, folderId: "folder-1" },
+    { kind: "delivery_confirm", delivery: true, accountIdentifier: ACCOUNT },
+  ];
+  for (const option of rejected) assert.equal(readDeliveryConfirmation(option), null, `expected null for ${JSON.stringify(option)}`);
+});
+
+test("R2-4: readDeliveryConfirmation returns 'replace' for a valid replace_confirm option, with the 'My Drive' and documentId fallbacks when those names are missing", () => {
+  const full = readDeliveryConfirmation({ kind: "replace_confirm", delivery: true, accountIdentifier: ACCOUNT, documentId: DOCUMENT_ID, documentName: DOCUMENT_NAME, folderName: FOLDER_NAME });
+  assert.equal(full?.action, "replace");
+  if (full?.action === "replace") {
+    assert.equal(full.accountIdentifier, ACCOUNT);
+    assert.equal(full.documentId, DOCUMENT_ID);
+    assert.equal(full.documentName, DOCUMENT_NAME);
+    assert.equal(full.folderName, FOLDER_NAME);
+  }
+  const fallback = readDeliveryConfirmation({ kind: "replace_confirm", delivery: true, accountIdentifier: ACCOUNT, documentId: DOCUMENT_ID });
+  assert.equal(fallback?.action, "replace");
+  if (fallback?.action === "replace") {
+    assert.equal(fallback.documentName, DOCUMENT_ID, "missing documentName falls back to documentId");
+    assert.equal(fallback.folderName, "My Drive", "missing folderName falls back to 'My Drive'");
+  }
+});
+
+test("R2-4: readDeliveryConfirmation returns null for replace_confirm without delivery === true, with an empty documentId, or with a missing accountIdentifier", () => {
+  const rejected = [
+    { kind: "replace_confirm", accountIdentifier: ACCOUNT, documentId: DOCUMENT_ID },
+    { kind: "replace_confirm", delivery: true, accountIdentifier: ACCOUNT, documentId: "" },
+    { kind: "replace_confirm", delivery: true, documentId: DOCUMENT_ID },
+  ];
+  for (const option of rejected) assert.equal(readDeliveryConfirmation(option), null, `expected null for ${JSON.stringify(option)}`);
+});
+
+test("R2-4: handleOutputDeliveryCallback 'keep' sends the 'Not replaced' message, leaves state.outputDelivery set, and makes ZERO Google requests", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const { calls } = installFake(t, (call) => {
+    if (call.url.includes("googleapis.com")) throw new Error(`no Google request may be made: ${call.url}`);
+    return new Response("{}", { status: 200 });
+  });
+  const state = toolState({
+    outputDelivery: { title: "Q3 plan", text: "Approved token-only output body.", capturedAt: "2026-11-23T10:00:00Z" },
+  });
+  const next = await handleOutputDeliveryCallback(env, state, "keep");
+  const sent = telegramTexts(calls);
+  assert.ok(
+    sent.some((text) => text.includes("Not replaced -- your approved output is still waiting. Scroll up to choose another file or folder.")),
+    `expected the 'Not replaced' message, got ${JSON.stringify(sent)}`,
+  );
+  assert.equal(next.outputDelivery?.title, "Q3 plan", "state.outputDelivery is still set after 'keep'");
+  assert.equal(next.outputDelivery?.text, "Approved token-only output body.", "the captured output text is untouched");
+  assert.equal(googleCalls(calls).length, 0, "ZERO Google requests for 'keep'");
+});
+
+test("R2-4: 'dismiss' still clears state.outputDelivery (unchanged)", async (t) => {
+  const { kv } = kvWithGoogleAccounts();
+  const env = fakeEnv({}, kv);
+  const { calls } = installFake(t, () => new Response("{}", { status: 200 }));
+  const state = toolState({
+    outputDelivery: { title: "Q3 plan", text: "Approved token-only output body.", capturedAt: "2026-11-23T10:00:00Z" },
+  });
+  const next = await handleOutputDeliveryCallback(env, state, "dismiss");
+  assert.equal(next.outputDelivery, undefined, "'dismiss' clears the captured output");
+  assert.equal(googleCalls(calls).length, 0, "no Google request for 'dismiss'");
 });

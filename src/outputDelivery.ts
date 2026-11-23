@@ -192,6 +192,13 @@ export async function handleOutputDeliveryCallback(
   const target: HatMessageTarget = { chatId: state.chatId, threadId: state.threadId, hat: state.hat, workId: state.workId };
   const captured = state.outputDelivery;
 
+  // "keep": No keeps the output -- nothing is cleared, nothing is created,
+  // and no Drive request is made. The output stays waiting for another pick.
+  if (value === "keep") {
+    await sendWorkspaceHatMessage(env, target, "Not replaced -- your approved output is still waiting. Scroll up to choose another file or folder.");
+    return state;
+  }
+
   if (value === "dismiss") {
     state.outputDelivery = undefined;
     await sendWorkspaceHatMessage(env, target, "Kept in chat -- nothing was created in Google Drive.");
@@ -455,4 +462,54 @@ export async function confirmOutputDeliveryReplace(
     workId: state.workId,
   });
   return state;
+}
+
+/**
+ * A staged confirmation option, consumed once: either "save as new Doc"
+ * (create) or "replace this Doc" (replace). Returned by readDeliveryConfirmation,
+ * which is the single "which confirmation is this?" check shared by
+ * runOutputDeliveryCallback (src/session.ts) and its tests.
+ */
+export type DeliveryConfirmation =
+  | { action: "create"; accountIdentifier: string; folderId: string; folderName: string }
+  | { action: "replace"; accountIdentifier: string; documentId: string; documentName: string; folderName: string };
+
+/**
+ * Reads a staged output-delivery confirmation option. Never throws: anything
+ * that isn't a valid create or replace confirmation returns null, including
+ * null itself. The create checks are exactly the ones runOutputDeliveryCallback
+ * ran inline before this function existed.
+ */
+export function readDeliveryConfirmation(option: Record<string, any> | null): DeliveryConfirmation | null {
+  if (!option || typeof option !== "object") return null;
+  if (
+    option.kind === "delivery_confirm" &&
+    option.delivery === true &&
+    typeof option.accountIdentifier === "string" &&
+    typeof option.folderId === "string"
+  ) {
+    return {
+      action: "create",
+      accountIdentifier: option.accountIdentifier,
+      folderId: option.folderId,
+      folderName: typeof option.folderName === "string" ? option.folderName : option.folderId,
+    };
+  }
+  if (
+    option.kind === "replace_confirm" &&
+    option.delivery === true &&
+    typeof option.accountIdentifier === "string" &&
+    option.accountIdentifier.length > 0 &&
+    typeof option.documentId === "string" &&
+    option.documentId.length > 0
+  ) {
+    return {
+      action: "replace",
+      accountIdentifier: option.accountIdentifier,
+      documentId: option.documentId,
+      documentName: typeof option.documentName === "string" ? option.documentName : option.documentId,
+      folderName: typeof option.folderName === "string" ? option.folderName : "My Drive",
+    };
+  }
+  return null;
 }

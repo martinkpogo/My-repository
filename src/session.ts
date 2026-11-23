@@ -53,7 +53,7 @@ import {
   handleGoogleActionApproval,
   consumeOpaqueOption,
 } from "./googleOAuth";
-import { handleOutputDeliveryCallback, confirmOutputDelivery, runWithSaveOnApproval, SAVE_ON_APPROVAL_SUFFIX } from "./outputDelivery";
+import { handleOutputDeliveryCallback, confirmOutputDelivery, confirmOutputDeliveryReplace, readDeliveryConfirmation, runWithSaveOnApproval, SAVE_ON_APPROVAL_SUFFIX } from "./outputDelivery";
 import { SESSIONS_INDEX_PENDING_CAP, deriveSessionLabel, safeEntityTokenRef, safeMatterTokenRef, sanitizeSessionsIndex, trimSessionsIndex, shouldAlertPendingApprovalBacklog } from "./sessionsIndex";
 import { closeHandoffIfOpen, closeHandoffOnResult } from "./handoffLifecycle";
 import {
@@ -669,34 +669,31 @@ export class WorkSession extends DurableObject<Env> {
    * this Work's execute cycle so a final confirmation's governed Tool
    * Registry invocation has the session's durable operation persistence
    * installed (same reason as the smoke confirmation). `value` is
-   * `dismiss`, `start`, or the opaque id of a staged `delivery_confirm`
-   * option (the final confirmation tap).
+   * `dismiss`, `start`, `keep`, or the opaque id of a staged `delivery_confirm`
+   * / `replace_confirm` option (the final confirmation tap).
    */
   async runOutputDeliveryCallback(value: string): Promise<WorkState> {
     const current = await this.require();
     const workId = String(current.workId);
-    if (value === "dismiss" || value === "start") {
+    if (value === "dismiss" || value === "start" || value === "keep") {
       return this.execute((s) => handleOutputDeliveryCallback(this.env, s, value));
     }
-    // Confirm: consume the staged delivery_confirm option (account + folder
-    // binding), then create. A missing/mismatched option changes nothing.
+    // Confirm: consume the staged confirmation option, then create or replace.
+    // A missing/mismatched option changes nothing. readDeliveryConfirmation is
+    // the single "which confirmation is this?" check (src/outputDelivery.ts).
     const option = await consumeOpaqueOption(this.env, workId, value);
-    if (
-      !option ||
-      option.kind !== "delivery_confirm" ||
-      option.delivery !== true ||
-      typeof option.accountIdentifier !== "string" ||
-      typeof option.folderId !== "string"
-    ) {
+    const confirmation = readDeliveryConfirmation(option);
+    if (!confirmation) {
       return this.execute(async (s) => {
         await sendMessage(this.env, s.chatId, "⚠️ That output-delivery confirmation is invalid or expired. Nothing was created.", undefined, s.threadId);
         return s;
       });
     }
-    const accountIdentifier = option.accountIdentifier;
-    const folderId = option.folderId;
-    const folderName = typeof option.folderName === "string" ? option.folderName : folderId;
-    return this.execute((s) => confirmOutputDelivery(this.env, s, accountIdentifier, folderId, folderName));
+    if (confirmation.action === "create") {
+      const { accountIdentifier, folderId, folderName } = confirmation;
+      return this.execute((s) => confirmOutputDelivery(this.env, s, accountIdentifier, folderId, folderName));
+    }
+    return this.execute((s) => confirmOutputDeliveryReplace(this.env, s, confirmation.accountIdentifier, confirmation.documentId, confirmation.documentName, confirmation.folderName));
   }
 
   /**
