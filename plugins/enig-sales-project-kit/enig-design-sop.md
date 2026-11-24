@@ -6,13 +6,14 @@
 
 - All design work sold as ENIG: design jobs and design engagements (`Engagement_Type` Design job or Design engagement). The consultancy follows the Project Instruction and skills unchanged.
 - For design work this SOP governs wherever a skill or the Static Reference says otherwise (including "never state a price").
-- Every new enquiry starts at S0 Triage.
+- Every new enquiry starts at S0 Triage, which suggests Studio treatment or consultancy treatment (internal terms only; clients deal with ENIG).
 
 ## 1. Never
 
 - Publish or send the price list itself. Quote each request individually.
 - Quote a design-job item not in §2, a blank price, or a price-list date that differs from §2.
 - Set or suggest a design-engagement price. Martin sets it; show only the minimum (§3).
+- Mention any price to a consultancy-treatment client before the sales call.
 - Send, write or change a status without Martin's approval of the exact action.
 - Write a name, email, phone, web address, place, brand or staff number into any Notion record (Notes and Current_understanding included).
 - Decline an enquiry without Martin's decision.
@@ -29,8 +30,8 @@
 | Single post | 1 design, final files | 250 | 1 | 1 working day |
 | 5-post pack | 5 designs, final files | 1,000 | 1 per post | 1–2 working days |
 | 10-post pack | 10 designs, final files | 1,800 | 1 per post | 2–3 working days; may be two halves (5 in 1–2 days, the rest by day 3) |
-| Flyer or poster, one side | 1 design, print-ready file | 300 | 1 | 1–2 working days |
-| Flyer, two sides | Front and back, print-ready file | 450 | 1 | 2 working days |
+| Flyer, poster or fact sheet, one side | 1 design, print-ready file | 300 | 1 | 1–2 working days |
+| Flyer or fact sheet, two sides | Front and back, print-ready file | 450 | 1 | 2 working days |
 | Business card | Front and back, print-ready file | 300 | 1 | 1–2 working days |
 | Stationery set | Business card, letterhead, and compliment slip or envelope | 750 | 2 | 3 working days |
 | Roll-up or large banner | 1 design, print-ready at full size | 450 | 1 | 2 working days |
@@ -54,7 +55,7 @@
 
 ## 3. Design engagements (established and large organisations)
 
-- **Price:** Martin sets it from the value brief (E3). **Minimum:** the §2 price for the same scope × 2 (established) or × 5 (large).
+- **Price:** Martin sets it from the value brief (E3). **Minimum:** the §2 price for the same scope × 2 (Established) or × 5 (Large), using the size Martin sets after the sales call.
 - **Hourly extras:** set in the proposal; minimum GHS 300 an hour (established) or GHS 600 (large).
 - **Packages** (building blocks for scope, priced by value; minimum base before × 2 or × 5 in brackets): brand identity system — Full logo, detailed brand guide (10–15 pages), stationery set, social media cover set, presentation template (5,000) · campaign pack — key visual, 10 posts, two-sided flyer, roll-up banner, email header (3,200) · monthly content plan — 20 posts a month, design only, minimum 3 months (3,000 a month) · brand guide on its own (1,500).
 - **Delivery, revisions and payment:** stated in the proposal; payment 50% deposit and 50% balance unless Martin decides otherwise.
@@ -70,14 +71,19 @@
 
 ## 5. Steps
 
-**S0. Triage.** For every new enquiry, present one triage card to Martin:
-- **Who:** Small, Established (more than 20 staff, several branches, or sold nationally) or Large (corporate, bank, telco, multinational, government agency, large NGO), with the evidence. Use only what the enquiry, the client or Martin says; if unclear, say so and ask.
-- **Asked for:** the items, mapped to §2 where they fit.
-- **Signs of a deeper problem:** falling sales blamed on design, repeated redesigns, a full rebrand, unclear positioning.
-- **Recommended type:** Design job, Design engagement, Consultancy, or decline (§6), with the reason.
-- **What to release:** a list-price quote, a call invitation, or a discovery call.
+**S0. Triage.** For every new enquiry, present one triage card to Martin: what was asked for (mapped to §2 where it fits); the signals seen for each characteristic below; signs of a deeper problem (falling sales blamed on design, repeated redesigns, a full rebrand, unclear positioning); the **suggested treatment** and why; and what to release (Studio treatment: a brief reply, then a quote; consultancy treatment: a sales-call invitation, no price).
 
-Martin chooses. Then: Design job → S1–S8 · Design engagement → E1–E6 · Consultancy → the existing skills · Decline → §6. Record the size in the Matter only as "Size: Small / Established / Large".
+| Characteristic | Points to Studio treatment | Points to consultancy treatment |
+|---|---|---|
+| Scale | One location, owner-run, local customers | Several branches or outlets, regional, national or international reach |
+| Structure | The owner decides | A manager, departments, several approvers, procurement or tenders |
+| Brand maturity | No brand, or a basic logo | An existing brand, guidelines, agencies used before |
+| What is at stake | Day-to-day sales | A launch, a campaign, investor-, regulator- or public-facing material, large contracts |
+| How they write | Informal, WhatsApp style | Business or formal email, a named role, letterhead, procurement language |
+
+Use only what the enquiry, the client or Martin says. With mixed signals, suggest the treatment most signals point to and say the signals are mixed. With too little to go on, say so and ask; never guess. The examples are guidance, weighed rather than ticked.
+
+Martin accepts or changes the treatment. Then: Studio treatment → design job, S1–S8 · Consultancy treatment → E1–E2, then Martin chooses design engagement (E3–E6) or full consultancy (the existing skills) · Decline → §6. Record the size Martin sets after the call in the Matter only as "Size: Small / Established / Large".
 
 ### Design job
 
@@ -105,13 +111,13 @@ Then draft the deposit request for Martin. Work starts when the deposit is paid 
 
 **S8. Close.** When the work is delivered and the Balance is Paid, propose: Matter Status Closed, `Next_action` "Delivered and paid.", and a log entry "Design work · job closed · MAT-n".
 
-### Design engagement
+### Consultancy treatment and design engagement
 
-**E1. Records.** As S2, with `Engagement_Type` = Design engagement.
+**E1. Records.** Run the existing `sales-enquiry` intake (Entity, Registry, Matter). Leave `Engagement_Type` empty (Consultancy) until Martin chooses after the call; for a design engagement, propose `Engagement_Type` = Design engagement then (one write, on approval).
 
-**E2. Call.** Draft a call invitation with proposed times for Martin's approval (calendar actions as in `sales-correspondence`).
+**E2. Sales call.** Draft the call invitation with proposed times for Martin's approval (calendar actions as in `sales-correspondence`). Prepare with `sales-call-prep` and capture what was learned with `sales-call-evidence`. The call establishes the client's size, what is at stake, the approvers and the real need. Then Martin chooses a design engagement (E3–E6) or full consultancy (the existing skills from fit assessment on), and sets the size.
 
-**E3. Value brief.** After the call (Martin's notes or a recording), prepare in chat: purpose (launch, rebrand, new product, tender); reach (products, shops, regions, customers); the commercial stake (expected sales, contract value, the cost of getting it wrong); timeline and approvers; any budget mentioned (context only, never the price); and the exact scope (deliverables, quantities, packages from §3). Propose one identity-safe Matter update summarising scope and stake.
+**E3. Value brief.** From the call evidence, prepare in chat: purpose (launch, rebrand, new product, tender); reach (products, shops, regions, customers); the commercial stake (expected sales, contract value, the cost of getting it wrong); timeline and approvers; any budget mentioned (context only, never the price); and the exact scope (deliverables, quantities, packages from §3). Propose one identity-safe Matter update summarising scope and stake.
 
 **E4. Price.** Show Martin the scope, the minimum (§4) and the value brief. Martin sets the price and the hourly rate for extras (at least the §3 minimum). Record his price and reason in `Current_understanding`.
 
