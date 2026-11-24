@@ -11,7 +11,7 @@ This file says **where things are** and holds the **static facts** Isolated Sale
 - How Isolated Sales operates (authority, approvals, solve-first, the four hard stops): the Project Instruction.
 - How each task is done: the enig-sales plugin (skills, `references/`, `scripts/`).
 - What governs: the Activity & Decision Log and the canonical Notion contracts linked below.
-- How design work is done (triage, design jobs, design engagements): `enig-design-sop.md` (project file, LOG-1351, LOG-1353).
+- How design work is done (steps, prices, levels, terms): `enig-design-sop.md`; how to assess and advise (question bank, tiers, offer card, messages): `enig-advisory-guide.md` (project files, LOG-1351, LOG-1353, LOG-1359).
 
 A fact here is not proof that a system works or that a record exists. If a fact here conflicts with a linked contract or a newer Log decision, the contract or decision wins; report the discrepancy and update this file once it is resolved.
 
@@ -70,6 +70,7 @@ Open these by URL. Do not search for copies.
 | ENIG Consultancy Profile (canonical description of the business, LOG-1150) | https://www.notion.so/401cb004e58381429e27c3e7087b8546 |
 | Design Work Operating Model | https://www.notion.so/422cb004e583812da158f13185e9c73b |
 | ENIG Design Work SOP (canonical text of `enig-design-sop.md`) | https://www.notion.so/422cb004e5838104b581cfc97a41c62b |
+| ENIG Advisory Guide (canonical text of `enig-advisory-guide.md`) | https://www.notion.so/422cb004e58381aeb90ac925380a5cf1 |
 
 ### Data sources and Sales' remit
 
@@ -97,7 +98,7 @@ The remit does not override contracts, approvals or access controls.
   - The Strategy → Finance Handoff forwards the same `Sources` link. Finance prices the approved intervention.
   - Runtime dependency **not deployed** (checked 2026-11-10 against the live Runtime code): Strategy reads the block only from the Handoff's `Verified Facts & Sources`. Until the change on branch `ccr-cec148fd-inw5vk` (commit `460e9f0`) is deployed, every thin Handoff carries the compatibility copy (Project Instruction §8).
   - Operating style: solve first; only the four hard stops in the Project Instruction stop an action.
-- **Log reviewed through LOG-1355 (2026-11-24).** Reflected here: LOG-1351, LOG-1352, LOG-1354 and LOG-1355 (design work rules, triage by treatment, item mapping and quoting details, in the SOP), LOG-1353 (one brand: design work sold as ENIG with three engagement types; `enig-design-sop.md`), LOG-1141 (lookups by search, fetch and backlinks), LOG-1149 (Handoff tokens move into `Sources`) and LOG-1164 (G3/U6 resolved). LOG-1165–1170 hold no Isolated Sales rule change (LOG-1170 purged the test records). LOG-1171–1350 hold no Isolated Sales rule change (LOG-1171 corrected this page; LOG-1173 is the Runtime Payments Clerk; the rest are Marketing, Operations, Runtime and AI-provider decisions). No Isolated Sales rule change: LOG-1150–1154, LOG-1161 and LOG-1163 (Kernel, Operating Principles and Consultancy Profile; LOG-1152's written-agreement requirement is implemented by LOG-1164); LOG-1148 concerns Runtime Lead Generation only. LOG-1155: build decisions now go to the Build Decision Record; this Log continues for operations. The rest are Discoveries, Activities and Blockers. (Earlier: LOG-1118–1139 held no rule change.)
+- **Log reviewed through LOG-1359 (2026-11-24).** Reflected here: LOG-1351, LOG-1352, LOG-1354, LOG-1355 and LOG-1358 (design work rules, conversation-first triage, item mapping and quoting details, in the SOP), LOG-1359 (pricing method, levels, paths and the advisory guide), LOG-1356–1357 hold no Isolated Sales rule change (Runtime Payments Clerk check and test-data discovery), LOG-1353 (one brand: design work sold as ENIG with three engagement types; `enig-design-sop.md`), LOG-1141 (lookups by search, fetch and backlinks), LOG-1149 (Handoff tokens move into `Sources`) and LOG-1164 (G3/U6 resolved). LOG-1165–1170 hold no Isolated Sales rule change (LOG-1170 purged the test records). LOG-1171–1350 hold no Isolated Sales rule change (LOG-1171 corrected this page; LOG-1173 is the Runtime Payments Clerk; the rest are Marketing, Operations, Runtime and AI-provider decisions). No Isolated Sales rule change: LOG-1150–1154, LOG-1161 and LOG-1163 (Kernel, Operating Principles and Consultancy Profile; LOG-1152's written-agreement requirement is implemented by LOG-1164); LOG-1148 concerns Runtime Lead Generation only. LOG-1155: build decisions now go to the Build Decision Record; this Log continues for operations. The rest are Discoveries, Activities and Blockers. (Earlier: LOG-1118–1139 held no rule change.)
 
 ### Known remaining issues
 
@@ -134,7 +135,7 @@ A Handoff carries the Entity and Matter only as `token:entity:ENT-n` / `token:ma
 
 ### Matter
 
-- Fields: `Matter` (title), `Matter_ID`, `Entity` (relation), `Status` (Open, Qualified, Commercial Development, Proposal, Converted, Closed), `Engagement_Type` (Consultancy, Design job, Design engagement; empty means Consultancy), `Stated_need`, `Current_understanding`, `Evidence_source`, `Next_action`.
+- Fields: `Matter` (title), `Matter_ID`, `Entity` (relation), `Status` (Open, Qualified, Commercial Development, Proposal, Converted, Closed), `Engagement_Type` (Consultancy, Design job, Design engagement; empty means Consultancy), `Level` (1a, 1b, 1c, 2, 3, 4a, 4b, INT-S, INT-L), `Result` (Open, Won, Lost), `Stated_need`, `Current_understanding`, `Evidence_source`, `Next_action`.
 - Title: `MAT-n – <non-identifying descriptor>`, en dash. New Matters start at Open.
 - `Evidence_source` is a locator: `Gmail thread <id>, message <id>, <YYYY-MM-DD>` or `Pasted enquiry, received <YYYY-MM-DD>`.
 - `Next_action` states the factual position, never a recommendation and never "awaiting handoff". Intake default: `Intake recorded; awaiting correspondence or sales call.`

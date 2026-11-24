@@ -1,19 +1,22 @@
 # ENIG DESIGN WORK SOP
 
-**Status:** Canonical. Approved by Martin, 24 Nov 2026. **Price list as of 24 Nov 2026.** Governing model: Design Work Operating Model (ENIG HQ / Business-Wide Operating Models), LOG-1351 to LOG-1355 and LOG-1358. Canonical text: the "ENIG Design Work SOP" Notion page under Isolated Sales: Operating Specification. This file is the Claude Project's working copy and must match it.
+**Status:** Canonical. Approved by Martin, 24 Nov 2026. **Price list as of 24 Nov 2026.** Governing model: Design Work Operating Model (ENIG HQ / Business-Wide Operating Models), LOG-1351 to LOG-1355, LOG-1358 and LOG-1359. Canonical text: the "ENIG Design Work SOP" Notion page under Isolated Sales: Operating Specification. This file is the Claude Project's working copy and must match it.
 
 ## 0. When this applies
 
 - All design work sold as ENIG: design jobs and design engagements (`Engagement_Type` Design job or Design engagement). The consultancy follows the Project Instruction and skills unchanged.
 - For design work this SOP governs wherever a skill or the Static Reference says otherwise (including "never state a price").
 - Every new enquiry, whatever its channel (email, WhatsApp or a call), starts at S0. Martin has a conversation with the client before any route or price is chosen; triage happens after it, at S2. No forms are sent.
+- Assessment and messaging follow `enig-advisory-guide.md` (project file). This SOP holds the steps, prices, levels and terms.
 
 ## 1. Never
 
 - Publish or send the price list itself. Quote each request individually.
 - Quote a price that does not come from §2 or from Martin, a blank price, or a price-list date that differs from §2.
 - Set or suggest a design-engagement price. Martin sets it; show only the minimum (§3).
-- Mention any price before the conversation (S1), or choose a route before it.
+- Quote any price before the conversation (S1), or choose a route before it. Exception: from level 3 Martin may give an anchor ("projects like this usually start from X", where X is the Floor, §4).
+- Use the client's budget to set or raise a price. Budget only qualifies the client and shapes the scope.
+- Show the client the levels, multipliers or formula. They see one price for the result plus a shorter option.
 - Diagnose. Sales gathers facts and may flag that a diagnosis could help, in the client's own words; diagnosis belongs to Strategy through the consultancy route.
 - Send, write or change a status without Martin's approval of the exact action.
 - Write a name, email, phone, web address, place, brand or staff number into any Notion record (Notes and Current_understanding included).
@@ -51,16 +54,55 @@
 - **Printing the client's own artwork:** add a file check of GHS 150 (1 hour) to confirm it is print-ready (size, bleed, resolution, colours). Fixes to the client's file are GHS 150 an hour. Errors in the client's own artwork are the client's responsibility.
 - **Editorial rules:** inner pages are all pages except the front and back covers, which are part of the setup; the client supplies final, proofread text before layout; text changes after layout are charged hourly; the page count is fixed in the quote and extra pages are charged per page; one sample spread is approved before full layout; custom charts or infographics are charged hourly.
 - **Extra revisions and out-of-scope work:** GHS 150 an hour, minimum 1 hour; hours estimate approved first.
-- **Minimum job value:** GHS 250.
+- **Minimum job value:** GHS 250 (level 1). Higher levels have their own minimums (§2A).
 - **Work not taken:** websites, photography, detailed illustration, running social media accounts.
 - **Busy week:** Martin may give a longer delivery time, but only before the deposit is paid.
 - **Several items:** if one depends on another (e.g. posts need the logo first), the delivery times add up; if independent, the longest time plus 1 working day per extra item. Martin may state otherwise in the quote.
 
+## 2A. Levels: scale and usage
+
+The level is set by whichever is higher, scale or usage, from what the client said in the conversation. Suggest it with evidence; Martin sets it.
+
+| Level | Who | Multiplier on the price list | Minimum project |
+|---|---|---|---|
+| 1a Micro | Home-based, just starting | × 1, lighter items, never discounted | — |
+| 1b Standard small | An established small shop | × 1 | — |
+| 1c Premium small | Small but upmarket (location, fit-out, high prices) | × 1.5 | — |
+| 2 Growing | Several outlets, regional, or heavier use | × 2 | — |
+| 3 National | Established, national presence, many touchpoints | × 5 | GHS 10,000 |
+| 4a Large local | Ghanaian banks, telcos, large corporates, government, large local NGOs | × 10 | GHS 30,000 |
+| 4b Multinational | Multinationals' Ghana operations, international NGOs and donors | × 15 | USD 5,000, quoted in USD |
+| INT-S | Small international clients (abroad, diaspora) | USD price list (§2C) | — |
+| INT-L | Established or large international clients | USD list × scale and usage | USD 5,000 |
+
+Signals: the client's own prices, premises, customers, outlets, markets, print volumes, media spend, approvers and procurement.
+
+## 2B. Steps (for paths)
+
+| Step | Depth: hours, price at level × 1 |
+|---|---|
+| Understand | Light (the conversation): included · Standard: 6 h, GHS 2,100 · Deep (with Strategy): 20 h, GHS 7,000 |
+| Define | One-page direction: 3 h, GHS 1,050 · Full direction: 8 h, GHS 2,800 |
+| Create | From §2 |
+| Equip | Usage sheet: included · Templates: 4 h, GHS 600 · Full library and handover: 10 h, GHS 1,500 |
+| Measure | Before and after: 2 h, GHS 700 · Baseline: 6 h, GHS 2,100 |
+| Sustain (optional) | Content Plan GHS 3,000 a month · Brand Care GHS 600 a month (up to 4 h); both × level |
+
+- Thinking steps (Understand, Define, Measure) are GHS 350 an hour; Equip GHS 150 an hour; Create from §2.
+- **Discovery fee** = the Understand step's price at the client's level, credited in full if they go ahead within 60 days.
+- **Brand Starter:** GHS 2,500 (Full logo, one-page direction, short guide, social covers, 3–5 templates).
+
+## 2C. International (USD)
+
+Basic logo 350 · Full logo 1,000 · Brand Starter 2,000 · Brand System from 5,000 · posts 60 / 250 / 450 · two-sided flyer 150 · tri-fold brochure 400 · company profile 900 (+80 per extra page) · Standard label 500 · Full packaging 1,200 · thinking steps USD 60 an hour · Equip and extras USD 50 an hour · Brand Care USD 250 a month.
+
+Payment by Wise, Payoneer or bank transfer (PayPal fees added); 50% deposit; formal agreement over USD 2,000; copyright transfers on full payment; working hours stated in GMT.
+
 ## 3. Design engagements (established and large organisations)
 
-- **Price:** Martin sets it from the value brief (E1). **Minimum:** the §2 price for the same scope × 2 (Established) or × 5 (Large), using the size Martin sets at S2.
-- **Hourly extras:** set in the proposal; minimum GHS 300 an hour (established) or GHS 600 (large).
-- **Packages** (building blocks for scope, priced by value; minimum base before × 2 or × 5 in brackets): brand identity system — Full logo, detailed brand guide (10–15 pages), stationery set, social media cover set, presentation template (5,000) · campaign pack — key visual, 10 posts, two-sided flyer, roll-up banner, email header (3,200) · monthly content plan — 20 posts a month, design only, minimum 3 months (3,000 a month) · brand guide on its own (1,500).
+- **Price:** Martin sets it from the value brief (E1). **Minimum:** the Floor (§4) at the level Martin sets at S2.
+- **Hourly extras:** set in the proposal; minimum GHS 350 an hour (level 3), GHS 600 (4a), USD 75 (4b), USD 50 (international).
+- **Packages** (building blocks for scope, priced by value; minimum base before the level multiplier, in brackets): brand identity system — Full logo, detailed brand guide (10–15 pages), stationery set, social media cover set, presentation template (5,000) · campaign pack — key visual, 10 posts, two-sided flyer, roll-up banner, email header (3,200) · monthly content plan — 20 posts a month, design only, minimum 3 months (3,000 a month) · brand guide on its own (1,500).
 - **Delivery, revisions and payment:** stated in the proposal; payment 50% deposit and 50% balance unless Martin decides otherwise.
 - Brand strategy (positioning, messaging, what the brand stands for) is the consultancy, not a design engagement.
 
@@ -68,8 +110,12 @@
 
 - Design-job total: each item × quantity + add-ons + printing fee (when printing is known).
 - Printing fee: show each band, e.g. `100 + 10% × 1,000 = 200`. Check against: 200 → 100 · 1,500 → 200 · 5,000 → 460 · 20,000 → 1,310.
-- Design-engagement minimum: the §2 total for the same scope, then × 2 or × 5.
-- Deposit and Balance: design total ÷ 2, rounded to 2 decimals; any rounding difference goes to the Balance. The print cost is not part of the 50/50 split.
+- **Floor** = (the path's steps from §2B + the §2 items) × the level multiplier, or the level minimum, whichever is higher. Show each line.
+- **Value at stake** = the client's own figures × the period (12 months by default), each with its source and evidence quality. No figures, no value line.
+- **Ratio** (for Martin only): value at stake ÷ Floor, and whether the price would sit within 5–15% of the value at stake (a sanity check, not a rule).
+- **Shorter path**, with its own Floor.
+- **Martin's price:** left blank for him.
+- Deposit and Balance: design total ÷ 2, rounded to 2 decimals; any rounding difference goes to the Balance. Over GHS 20,000 (or USD 2,000): 40% / 30% / 30% at start, midpoint and delivery. The print cost is not part of the split.
 - Quote gross amounts. Withholding tax is recorded at payment by the Payments Clerk.
 
 ## 5. Steps
@@ -79,7 +125,7 @@
 1. Run the existing `sales-enquiry` intake (Entity, Registry, Matter). A returning client gets a new Matter linked to the existing Entity. Leave `Engagement_Type` empty until S2.
 2. Map each requested item to the closest §2 item by its characteristics (format, sides or pages, the design work involved, what is included), with the reasoning. The price always comes from §2; if nothing is close, say so. No price goes to the client yet.
 3. Flag anything not taken or below the minimum (§6) before the conversation.
-4. Prepare Martin's **question guide**, tailored to this enquiry:
+4. Prepare Martin's **question guide** from the question bank in `enig-advisory-guide.md` §3 (by request, situation and client type), ordered Goal → Why now → Proof → Stakes → Practicals → Next, with the 3–4 most important questions first, as a phone-sized call card or WhatsApp questions. From level 3, include the anchor (§1). It covers:
    - what the client has already said (so Martin does not ask it again);
    - brief questions: items, quantities, sizes or formats, page counts, deadline, existing logo or brand files, copy, printing (quantity, material, finish, who supplies the artwork), and who approves;
    - situation questions, worded naturally for this client: why now; what they expect the new design to achieve; how they will know it worked; whether the direction is decided; earlier redesigns and what happened; what happens if it does not work;
@@ -88,15 +134,15 @@
 
 **S1. Record the conversation.** Martin has the conversation himself (call, WhatsApp or meeting) and pastes it, or his notes. Record it with `sales-call-evidence`: the client's answers as client statements, identity only in the Registry.
 
-**S2. Triage and offer card.** From the recorded conversation, present one offer card to Martin:
+**S2. Triage and offer card.** From the recorded conversation, present the offer card in `enig-advisory-guide.md` §9 (level with evidence, tier A/B/C with the hypothesis test, the Floor and shorter path, the value at stake and ratio, budget fit, the recommendation with consequences, and the six-part draft message). It includes:
 
 - **Facts:** the brief, gaps still open, deadline, printing.
-- **Size:** Small, Established or Large, from what the client said (scale, structure, brand maturity, what is at stake), with the evidence. If unclear, say so and ask.
+- **Level:** from §2A, by scale or usage, with the evidence. If unclear, say so and ask.
 - **Route:** design job, design engagement or consultancy, with the reason.
 - **Diagnostic flag:** only when the client, in their own words, links a business problem to the brand and the direction or result is unclear (§5A). Quote their words.
 - **What ENIG would also recommend, and why:** only §2 items, §3 packages or a diagnosis, each tied to something the client said.
 
-Martin chooses the route and size. Propose `Engagement_Type` (Design job or Design engagement) as one write on his approval, and record the size in the Matter only as "Size: Small / Established / Large". Then: design job → S3–S8 · design engagement → E1–E4 · consultancy → the existing skills from fit assessment on · decline → §6.
+Martin sets the route, level, tier and price. Propose `Engagement_Type` (Design job or Design engagement), `Level` and `Result` = Open as one write on his approval. Then: design job → S3–S8 · design engagement → E1–E4 · consultancy → the existing skills from fit assessment on · decline → §6.
 
 **§5A. Design work or a need for strategy (what to listen for).** The key test: would a great design alone solve what the client described?
 
@@ -119,11 +165,11 @@ Sales only flags; Martin decides; the client chooses. A recommendation is never 
 
 1. Payment `MAT-n deposit`: Matter_Token, Type Deposit, Amount = half, Currency, Status Due, Due_Date today, Notes "Design job: {items}, price list 24 Nov 2026" (for an engagement: "Design engagement: {deliverables}").
 2. Payment `MAT-n balance`: the same with Type Balance, Due_Date empty, Notes "Due on delivery".
-3. Matter: Status Converted; `Evidence_source` gains the acceptance locator (`Gmail thread {id}, message {id}, {date}` or `WhatsApp acceptance pasted, {date}`).
+3. Matter: Status Converted, Result Won; `Evidence_source` gains the acceptance locator (`Gmail thread {id}, message {id}, {date}` or `WhatsApp acceptance pasted, {date}`).
 4. Entity: Lead or Prospect → Client (no change if already Client).
 5. Log: Type Activity, Area Sales, Outcome Complete, Entry "Design work · job won · MAT-n".
 
-Then draft the deposit request for Martin. Work starts when the deposit is paid and the brief is complete.
+Then draft the deposit request for Martin. Work starts when the deposit is paid and the brief is complete. If the client declines, or the quote expires (30 days) without acceptance, propose Matter `Result` = Lost and `Next_action` with the reason.
 
 **S6. Printing (if any).** Get the printer's price from Martin; quote print cost + fee (§4), plus the GHS 150 file check for client artwork, in a separate approved email. Create the print-cost Payment (Type Other, Status Due, Notes "Print cost") on Martin's approval. No print order until it is Paid and the client has approved the final proof in writing.
 
@@ -157,6 +203,11 @@ Mixed enquiry: the normal path for the items taken; the quote politely excludes 
 - Printing: the print cost is paid in full before ordering; the client approves the final proof in writing; printed colours may vary slightly from the screen; the printer's deadline is an estimate.
 - Copywriting: the client approves the copy before design and confirms every fact.
 - Editorial: final, proofread text before layout; the page count is as quoted.
+- This quote is valid for 30 days.
+- Rush delivery (under half the normal time): +50%.
+- The deposit is non-refundable once work starts; work beyond the deposit is billed if the project is cancelled.
+- For larger projects: work pauses if a payment is more than 14 days overdue.
+- International: copyright transfers on full payment.
 - Replying "yes, accepted" to this quote is your agreement to these terms (formal agreements excepted, §8).
 
 ## 8. Agreements (LOG-1352, LOG-1353)
