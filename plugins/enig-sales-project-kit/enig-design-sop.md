@@ -1,6 +1,6 @@
 # ENIG DESIGN WORK SOP
 
-**Status:** Canonical. Approved by Martin, 24 Nov 2026. **Price list as of 24 Nov 2026.** Governing model: Design Work Operating Model (ENIG HQ / Business-Wide Operating Models), LOG-1351, LOG-1352 and LOG-1353. Canonical text: the "ENIG Design Work SOP" Notion page under Isolated Sales: Operating Specification. This file is the Claude Project's working copy and must match it.
+**Status:** Canonical. Approved by Martin, 24 Nov 2026. **Price list as of 24 Nov 2026.** Governing model: Design Work Operating Model (ENIG HQ / Business-Wide Operating Models), LOG-1351, LOG-1352, LOG-1353 and LOG-1354. Canonical text: the "ENIG Design Work SOP" Notion page under Isolated Sales: Operating Specification. This file is the Claude Project's working copy and must match it.
 
 ## 0. When this applies
 
@@ -11,7 +11,7 @@
 ## 1. Never
 
 - Publish or send the price list itself. Quote each request individually.
-- Quote a design-job item not in §2, a blank price, or a price-list date that differs from §2.
+- Quote a price that does not come from §2 or from Martin, a blank price, or a price-list date that differs from §2.
 - Set or suggest a design-engagement price. Martin sets it; show only the minimum (§3).
 - Mention any price to a consultancy-treatment client before the sales call.
 - Send, write or change a status without Martin's approval of the exact action.
@@ -87,7 +87,7 @@ Martin accepts or changes the treatment. Then: Studio treatment → design job, 
 
 ### Design job
 
-**S1. Map.** List what is asked against §2, including add-ons, ranges and printing.
+**S1. Map.** Map each requested item to the closest §2 item by its characteristics: format (single page, folded, multi-page, digital or print), sides or pages, the design work involved (new design, resize or variant) and what is included. Show the reasoning for each match, e.g. "Fact sheet, two sides → Flyer or fact sheet, two sides (450): a single sheet, front and back". Include add-ons, ranges and printing. The price always comes from §2. If nothing on the list is close, say so, give the nearest options and ask Martin to quote it; never invent a price or estimate hours. Martin accepts or changes each mapping at S4. When an unlisted item keeps recurring, point it out to Martin as a candidate for its own price-list line.
 
 **S2. Records.** Run the existing `sales-enquiry` intake (Entity, Registry, Matter). In the same approval message, propose `Engagement_Type` = Design job. A returning client gets a new Matter linked to the existing Entity.
 
