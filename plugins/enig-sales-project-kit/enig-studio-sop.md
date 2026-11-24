@@ -1,6 +1,6 @@
 # ENIG STUDIO SOP: DESIGN JOBS
 
-**Status:** Canonical. Approved by Martin, 24 Nov 2026. **Price list as of 24 Nov 2026.** Governing model: Design Jobs Operating Model (ENIG HQ / Business-Wide Operating Models), LOG-1351. Canonical text: the "ENIG Studio SOP" Notion page under Isolated Sales: Operating Specification. This file is the Claude Project's working copy and must match it.
+**Status:** Canonical. Approved by Martin, 24 Nov 2026. **Price list as of 24 Nov 2026.** Governing model: Design Jobs Operating Model (ENIG HQ / Business-Wide Operating Models), LOG-1351 and LOG-1352. Canonical text: the "ENIG Studio SOP" Notion page under Isolated Sales: Operating Specification. This file is the Claude Project's working copy and must match it.
 
 ## 0. When this applies
 
@@ -29,10 +29,12 @@
 | Starter label | Front only, one product, one size, client's existing logo and text, print-ready file | 400 | 1 | 1–2 working days |
 | Standard label | Front and back, one product, one size, 2 ideas, print-ready file and mock-up | 800 | 2 | 2–3 working days |
 | Full packaging | Box, pouch or bag, every side, on the printer's template, print-ready file and mock-up | 1,800 | 2 | 5–7 working days |
-| Whole product range | Several products or sizes | Martin quotes | — | Agreed per job |
+| Product range | Several products, flavours or sizes | By the range rules below | As for the level | Agreed per job |
 
 - **Copywriting add-on (posts only):** +50 single · +200 for 5 · +300 for 10. Copy approved before design; 1 copy revision; client confirms every fact; marketing copy only (the client supplies legal or regulated text).
-- **Printing add-on (only for designs ENIG Studio made):** print cost passed through and paid 100% up front. Coordination fee: GHS 100 for the first GHS 500 of print cost, + 10% of the part from 500 to 2,000, + 7% of the part from 2,000 to 10,000, + 5% of the part above 10,000. Each extra trip GHS 100.
+- **Printing add-on:** print cost passed through and paid 100% up front. Coordination fee: GHS 100 for the first GHS 500 of print cost, + 10% of the part from 500 to 2,000, + 7% of the part from 2,000 to 10,000, + 5% of the part above 10,000. Each extra trip GHS 100.
+- **Printing the client's own artwork:** add a file check of GHS 150 (1 hour) to confirm it is print-ready (size, bleed, resolution, colours). Fixes to the client's file are GHS 150 an hour. Errors in the client's own artwork are the client's responsibility.
+- **Product ranges:** new design (a new layout, or a different item) 100% of the level's price · resize (same design and content, different size or shape; elements removed, moved or shortened) 50% · variant (same layout and size; new flavour name, colours or text) 40%. The client approves any content removed or shortened for a resize. When the type is unclear, ask Martin.
 - **Extra revisions and out-of-scope work:** GHS 150 an hour, minimum 1 hour; hours estimate approved first.
 - **Minimum job value:** GHS 250.
 - **Work not taken:** websites, photography, detailed illustration, running social media accounts.
@@ -47,7 +49,7 @@
 
 ## 4. Steps
 
-**S1. Recognise.** Read the enquiry (Gmail or pasted). List what is asked against §2. Classify: Design job · Mixed (some items not taken) · Not taken (§5) · Below minimum (§5) · Not on the list or whole product range (ask Martin) · Possibly consultancy (ask Martin).
+**S1. Recognise.** Read the enquiry (Gmail or pasted). List what is asked against §2. Classify: Design job · Mixed (some items not taken) · Not taken (§5) · Below minimum (§5) · Product range (price by the range rules) · Not on the list (ask Martin) · Possibly consultancy (ask Martin).
 
 **S2. Records.** Run the existing `sales-enquiry` intake (Entity, Registry, Matter). In the same approval message, propose `Engagement_Type` = Design job on the new Matter. A returning client gets a new Matter linked to the existing Entity.
 
@@ -65,7 +67,7 @@
 
 Then draft the deposit request for Martin. Work starts when the deposit is paid and the brief is complete.
 
-**S6. Printing (if any).** Get the printer's price from Martin; quote print cost + fee (§3) in a separate approved email. Create the print-cost Payment (Type Other, Status Due, Notes "Print cost") on Martin's approval. No print order until it is Paid and the client has approved the final proof in writing.
+**S6. Printing (if any).** Get the printer's price from Martin; quote print cost + fee (§3), plus the GHS 150 file check for client artwork, in a separate approved email. Create the print-cost Payment (Type Other, Status Due, Notes "Print cost") on Martin's approval. No print order until it is Paid and the client has approved the final proof in writing.
 
 **S7. Payments.** Martin records payments as Paid through the Payments Clerk in Telegram, as today. This SOP never sets a Payment to Paid.
 
@@ -88,9 +90,10 @@ Mixed enquiry: normal S2–S5 for the items taken; the quote email politely excl
 - Copywriting: the client approves the copy before design and confirms every fact.
 - Replying "yes, accepted" to this quote is your agreement to these terms.
 
-## 7. Open item
+## 7. Agreements (LOG-1352)
 
-Whole product range and other per-job quotes need a formal agreement. That process is not defined here yet: stop and ask Martin.
+- Up to GHS 5,000: the client's written acceptance of the quote is the agreement (S5).
+- Over GHS 5,000: a formal agreement from the Client Service Agreement Template, under the CSA contract's design-job rule. Proposal_Token and Proposal_Version stay empty; scope, price, currency, delivery times and deliverables come only from the approved quote email, whose locator goes in the Agreements row's Notes (`Quote: Gmail thread {id}, message {id}`). Terms: the Template plus §6. Prepare the document and email, send only on Martin's approval of the exact email, set Signed only on his confirmation. Then continue with S5's conversion package. Work starts only when Signed and the Deposit is Paid.
 
 ## 8. Notion calls (keep to these)
 
