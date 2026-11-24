@@ -11,6 +11,7 @@ This file says **where things are** and holds the **static facts** Isolated Sale
 - How Isolated Sales operates (authority, approvals, solve-first, the four hard stops): the Project Instruction.
 - How each task is done: the enig-sales plugin (skills, `references/`, `scripts/`).
 - What governs: the Activity & Decision Log and the canonical Notion contracts linked below.
+- How design jobs are done: `enig-studio-sop.md` (project file, LOG-1351).
 
 A fact here is not proof that a system works or that a record exists. If a fact here conflicts with a linked contract or a newer Log decision, the contract or decision wins; report the discrepancy and update this file once it is resolved.
 
@@ -67,19 +68,21 @@ Open these by URL. Do not search for copies.
 | Client Service Agreement Template | https://www.notion.so/413cb004e58381f48673fab4361d34f3 |
 | LOG-1164 (G3/U6 resolved: CSA and post-release Proposal Status) | https://www.notion.so/413cb004e58381108e60f22294827e0a |
 | ENIG Consultancy Profile (canonical description of the business, LOG-1150) | https://www.notion.so/401cb004e58381429e27c3e7087b8546 |
+| Design Jobs Operating Model | https://www.notion.so/422cb004e583812da158f13185e9c73b |
+| ENIG Studio SOP (canonical text of `enig-studio-sop.md`) | https://www.notion.so/422cb004e5838104b581cfc97a41c62b |
 
 ### Data sources and Sales' remit
 
 | Object | Data source | Isolated Sales may |
 | --- | --- | --- |
-| Entity | `collection://437248f7-f6d8-4e70-873b-7b1eb0fdc519` | Match; create after approval; Lead → Prospect in approved progression |
-| Matters | `collection://0e68feef-224d-433d-a813-0f6ec5e1c036` | Match; create after approval; update evidence after approval; Open → Qualified in approved progression |
+| Entity | `collection://437248f7-f6d8-4e70-873b-7b1eb0fdc519` | Match; create after approval; Lead → Prospect in approved progression; Lead or Prospect → Client for an accepted design job (SOP) |
+| Matters | `collection://0e68feef-224d-433d-a813-0f6ec5e1c036` | Match; create after approval; update evidence after approval; Open → Qualified in approved progression; set `Engagement_Type`; Open → Converted → Closed for design jobs (SOP) |
 | Identity Resolution Registry | `collection://b737c4c4-9416-42f0-b733-1145bdde31f0` | Read for matching and release; create with a new Entity after approval |
 | Call Notes | `collection://a2bf0fa6-7fd5-47ab-b5f2-1fc599f2d164` | Read; create canonical records after approval |
 | Handoffs | `collection://935cff62-de01-4920-9743-782c7d210455` | Create the approved Sales → Strategy Work Handoff; Concern where authorised |
 | Proposals | `collection://3b7bf0fa-7664-4ef1-a91b-282316696b6c` | Read; set `Artifact Reference` and `Artifact Status` in release; set `Status` Sent at Delivered, Accepted on Martin's confirmation, Inactive on his instruction |
 | Agreements | `collection://6b71106b-5cbe-4bd3-831e-2c1dd96d0a34` | Create and update after approval |
-| Payments | `collection://703a276e-2183-4f89-9627-9625b099a851` | Create the Deposit and Balance rows at signing, after approval; never mark Paid |
+| Payments | `collection://703a276e-2183-4f89-9627-9625b099a851` | Create the Deposit and Balance rows at signing, after approval; for design jobs, create the Deposit, Balance and print-cost rows after approval (SOP); never mark Paid |
 | Activity & Decision Log | `collection://423e7f93-5f9d-435d-856a-e183120d3d8f` | Append one stage entry per completed stage |
 
 The remit does not override contracts, approvals or access controls.
@@ -94,7 +97,7 @@ The remit does not override contracts, approvals or access controls.
   - The Strategy → Finance Handoff forwards the same `Sources` link. Finance prices the approved intervention.
   - Runtime dependency **not deployed** (checked 2026-11-10 against the live Runtime code): Strategy reads the block only from the Handoff's `Verified Facts & Sources`. Until the change on branch `ccr-cec148fd-inw5vk` (commit `460e9f0`) is deployed, every thin Handoff carries the compatibility copy (Project Instruction §8).
   - Operating style: solve first; only the four hard stops in the Project Instruction stop an action.
-- **Log reviewed through LOG-1170 (2026-11-11).** Reflected here: LOG-1141 (lookups by search, fetch and backlinks), LOG-1149 (Handoff tokens move into `Sources`) and LOG-1164 (G3/U6 resolved). LOG-1165–1170 hold no Isolated Sales rule change (LOG-1170 purged the test records). No Isolated Sales rule change: LOG-1150–1154, LOG-1161 and LOG-1163 (Kernel, Operating Principles and Consultancy Profile; LOG-1152's written-agreement requirement is implemented by LOG-1164); LOG-1148 concerns Runtime Lead Generation only. LOG-1155: build decisions now go to the Build Decision Record; this Log continues for operations. The rest are Discoveries, Activities and Blockers. (Earlier: LOG-1118–1139 held no rule change.)
+- **Log reviewed through LOG-1351 (2026-11-24).** Reflected here: LOG-1351 (ENIG Studio design jobs follow `enig-studio-sop.md`), LOG-1141 (lookups by search, fetch and backlinks), LOG-1149 (Handoff tokens move into `Sources`) and LOG-1164 (G3/U6 resolved). LOG-1165–1170 hold no Isolated Sales rule change (LOG-1170 purged the test records). LOG-1171–1350 hold no Isolated Sales rule change (LOG-1171 corrected this page; LOG-1173 is the Runtime Payments Clerk; the rest are Marketing, Operations, Runtime and AI-provider decisions). No Isolated Sales rule change: LOG-1150–1154, LOG-1161 and LOG-1163 (Kernel, Operating Principles and Consultancy Profile; LOG-1152's written-agreement requirement is implemented by LOG-1164); LOG-1148 concerns Runtime Lead Generation only. LOG-1155: build decisions now go to the Build Decision Record; this Log continues for operations. The rest are Discoveries, Activities and Blockers. (Earlier: LOG-1118–1139 held no rule change.)
 
 ### Known remaining issues
 
@@ -131,7 +134,7 @@ A Handoff carries the Entity and Matter only as `token:entity:ENT-n` / `token:ma
 
 ### Matter
 
-- Fields: `Matter` (title), `Matter_ID`, `Entity` (relation), `Status` (Open, Qualified, Commercial Development, Proposal, Converted, Closed), `Stated_need`, `Current_understanding`, `Evidence_source`, `Next_action`.
+- Fields: `Matter` (title), `Matter_ID`, `Entity` (relation), `Status` (Open, Qualified, Commercial Development, Proposal, Converted, Closed), `Engagement_Type` (Consultancy, Design job; empty means Consultancy), `Stated_need`, `Current_understanding`, `Evidence_source`, `Next_action`.
 - Title: `MAT-n – <non-identifying descriptor>`, en dash. New Matters start at Open.
 - `Evidence_source` is a locator: `Gmail thread <id>, message <id>, <YYYY-MM-DD>` or `Pasted enquiry, received <YYYY-MM-DD>`.
 - `Next_action` states the factual position, never a recommendation and never "awaiting handoff". Intake default: `Intake recorded; awaiting correspondence or sales call.`
@@ -190,7 +193,7 @@ A Handoff carries the Entity and Matter only as `token:entity:ENT-n` / `token:ma
 
 ## Specialization scope
 
-From the Business-Wide Operating Principles (the page wins on any conflict): ENIG solves real business problems of positioning, perception and how a business communicates. Diagnosis comes first; the intervention follows from it. Visual brand identity design is one possible intervention, only when the diagnosis supports it, never the default.
+From the Business-Wide Operating Principles (the page wins on any conflict): ENIG solves real business problems of positioning, perception and how a business communicates. Diagnosis comes first; the intervention follows from it. Visual brand identity design is one possible intervention, only when the diagnosis supports it, never the default. This scope governs the consultancy. ENIG Studio design jobs (LOG-1351) are design work sold as requested, from the SOP's price list.
 
 ## Qualification conditions
 
@@ -224,4 +227,4 @@ Labelling rules and templates: `references/evidence-examples.md`.
 
 ## Maintaining this file
 
-Keep it to locations and facts. Never name an individual record (an Entity, Matter, Proposal, Call Notes, Handoff, Lead or Registry row); point to the database that holds it. Record history lives in the Activity & Decision Log. Procedures belong in the plugin; operating rules belong in the Project Instruction. The canonical text is the "Static Reference" Notion page (LOG-1117, LOG-1140): change it there first, through a logged Decision or Change, then copy it here. When the Log changes a fact, update the matching section and the "Log reviewed through" line; the plugin's log check uses that line as its baseline, so a new Decision pauses intake and progression until this line is updated.
+Keep it to locations and facts. Never name an individual record (an Entity, Matter, Proposal, Call Notes, Handoff, Lead or Registry row); point to the database that holds it. Record history lives in the Activity & Decision Log. Procedures belong in the plugin, except design jobs, which follow `enig-studio-sop.md`; operating rules belong in the Project Instruction. The canonical text is the "Static Reference" Notion page (LOG-1117, LOG-1140): change it there first, through a logged Decision or Change, then copy it here. When the Log changes a fact, update the matching section and the "Log reviewed through" line; the plugin's log check uses that line as its baseline, so a new Decision pauses intake and progression until this line is updated.
