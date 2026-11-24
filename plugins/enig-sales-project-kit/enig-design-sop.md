@@ -1,19 +1,20 @@
 # ENIG DESIGN WORK SOP
 
-**Status:** Canonical. Approved by Martin, 24 Nov 2026. **Price list as of 24 Nov 2026.** Governing model: Design Work Operating Model (ENIG HQ / Business-Wide Operating Models), LOG-1351, LOG-1352, LOG-1353, LOG-1354 and LOG-1355. Canonical text: the "ENIG Design Work SOP" Notion page under Isolated Sales: Operating Specification. This file is the Claude Project's working copy and must match it.
+**Status:** Canonical. Approved by Martin, 24 Nov 2026. **Price list as of 24 Nov 2026.** Governing model: Design Work Operating Model (ENIG HQ / Business-Wide Operating Models), LOG-1351 to LOG-1355 and LOG-1358. Canonical text: the "ENIG Design Work SOP" Notion page under Isolated Sales: Operating Specification. This file is the Claude Project's working copy and must match it.
 
 ## 0. When this applies
 
 - All design work sold as ENIG: design jobs and design engagements (`Engagement_Type` Design job or Design engagement). The consultancy follows the Project Instruction and skills unchanged.
 - For design work this SOP governs wherever a skill or the Static Reference says otherwise (including "never state a price").
-- Every new enquiry starts at S0 Triage, which suggests Studio treatment or consultancy treatment (internal terms only; clients deal with ENIG).
+- Every new enquiry, whatever its channel (email, WhatsApp or a call), starts at S0. Martin has a conversation with the client before any route or price is chosen; triage happens after it, at S2. No forms are sent.
 
 ## 1. Never
 
 - Publish or send the price list itself. Quote each request individually.
 - Quote a price that does not come from §2 or from Martin, a blank price, or a price-list date that differs from §2.
 - Set or suggest a design-engagement price. Martin sets it; show only the minimum (§3).
-- Mention any price to a consultancy-treatment client before the sales call.
+- Mention any price before the conversation (S1), or choose a route before it.
+- Diagnose. Sales gathers facts and may flag that a diagnosis could help, in the client's own words; diagnosis belongs to Strategy through the consultancy route.
 - Send, write or change a status without Martin's approval of the exact action.
 - Write a name, email, phone, web address, place, brand or staff number into any Notion record (Notes and Current_understanding included).
 - Decline an enquiry without Martin's decision.
@@ -57,7 +58,7 @@
 
 ## 3. Design engagements (established and large organisations)
 
-- **Price:** Martin sets it from the value brief (E3). **Minimum:** the §2 price for the same scope × 2 (Established) or × 5 (Large), using the size Martin sets after the sales call.
+- **Price:** Martin sets it from the value brief (E1). **Minimum:** the §2 price for the same scope × 2 (Established) or × 5 (Large), using the size Martin sets at S2.
 - **Hourly extras:** set in the proposal; minimum GHS 300 an hour (established) or GHS 600 (large).
 - **Packages** (building blocks for scope, priced by value; minimum base before × 2 or × 5 in brackets): brand identity system — Full logo, detailed brand guide (10–15 pages), stationery set, social media cover set, presentation template (5,000) · campaign pack — key visual, 10 posts, two-sided flyer, roll-up banner, email header (3,200) · monthly content plan — 20 posts a month, design only, minimum 3 months (3,000 a month) · brand guide on its own (1,500).
 - **Delivery, revisions and payment:** stated in the proposal; payment 50% deposit and 50% balance unless Martin decides otherwise.
@@ -73,29 +74,46 @@
 
 ## 5. Steps
 
-**S0. Triage.** For every new enquiry, present one triage card to Martin: what was asked for (mapped to §2 where it fits); the signals seen for each characteristic below; signs of a deeper problem (falling sales blamed on design, repeated redesigns, a full rebrand, unclear positioning); the **suggested treatment** and why; and what to release (Studio treatment: a brief reply, then a quote; consultancy treatment: a sales-call invitation, no price).
+**S0. Enquiry and question guide.** Martin pastes the enquiry (email, WhatsApp, or his notes of a call). Then, in one message for Martin's approval:
 
-| Characteristic | Points to Studio treatment | Points to consultancy treatment |
+1. Run the existing `sales-enquiry` intake (Entity, Registry, Matter). A returning client gets a new Matter linked to the existing Entity. Leave `Engagement_Type` empty until S2.
+2. Map each requested item to the closest §2 item by its characteristics (format, sides or pages, the design work involved, what is included), with the reasoning. The price always comes from §2; if nothing is close, say so. No price goes to the client yet.
+3. Flag anything not taken or below the minimum (§6) before the conversation.
+4. Prepare Martin's **question guide**, tailored to this enquiry:
+   - what the client has already said (so Martin does not ask it again);
+   - brief questions: items, quantities, sizes or formats, page counts, deadline, existing logo or brand files, copy, printing (quantity, material, finish, who supplies the artwork), and who approves;
+   - situation questions, worded naturally for this client: why now; what they expect the new design to achieve; how they will know it worked; whether the direction is decided; earlier redesigns and what happened; what happens if it does not work;
+   - what to listen for (§5A).
+5. Draft Martin's first message (to send himself, e.g. on WhatsApp) or a meeting invitation with proposed times (calendar actions as in `sales-correspondence`).
+
+**S1. Record the conversation.** Martin has the conversation himself (call, WhatsApp or meeting) and pastes it, or his notes. Record it with `sales-call-evidence`: the client's answers as client statements, identity only in the Registry.
+
+**S2. Triage and offer card.** From the recorded conversation, present one offer card to Martin:
+
+- **Facts:** the brief, gaps still open, deadline, printing.
+- **Size:** Small, Established or Large, from what the client said (scale, structure, brand maturity, what is at stake), with the evidence. If unclear, say so and ask.
+- **Route:** design job, design engagement or consultancy, with the reason.
+- **Diagnostic flag:** only when the client, in their own words, links a business problem to the brand and the direction or result is unclear (§5A). Quote their words.
+- **What ENIG would also recommend, and why:** only §2 items, §3 packages or a diagnosis, each tied to something the client said.
+
+Martin chooses the route and size. Propose `Engagement_Type` (Design job or Design engagement) as one write on his approval, and record the size in the Matter only as "Size: Small / Established / Large". Then: design job → S3–S8 · design engagement → E1–E4 · consultancy → the existing skills from fit assessment on · decline → §6.
+
+**§5A. Design work or a need for strategy (what to listen for).** The key test: would a great design alone solve what the client described?
+
+| | Design work | A diagnosis may help |
 |---|---|---|
-| Scale | One location, owner-run, local customers | Several branches or outlets, regional, national or international reach |
-| Structure | The owner decides | A manager, departments, several approvers, procurement or tenders |
-| Brand maturity | No brand, or a basic logo | An existing brand, guidelines, agencies used before |
-| What is at stake | Day-to-day sales | A launch, a campaign, investor-, regulator- or public-facing material, large contracts |
-| How they write | Informal, WhatsApp style | Business or formal email, a named role, letterhead, procurement language |
+| Goal | A visual result: premium, modern, consistent | A business result they link to the brand: more shops, fewer lost customers, higher prices |
+| Direction | Clear: they can describe their customers and the feeling they want | Unclear or disputed |
+| Why now | A launch, a new product, an outdated look | A problem: falling sales, competitors winning, customers misunderstanding them |
+| History | First redesign, or long since the last | Several redesigns that did not fix anything |
 
-Use only what the enquiry, the client or Martin says. With mixed signals, suggest the treatment most signals point to and say the signals are mixed. With too little to go on, say so and ask; never guess. The examples are guidance, weighed rather than ticked.
-
-Martin accepts or changes the treatment. Then: Studio treatment → design job, S1–S8 · Consultancy treatment → E1–E2, then Martin chooses design engagement (E3–E6) or full consultancy (the existing skills) · Decline → §6. Record the size Martin sets after the call in the Matter only as "Size: Small / Established / Large".
+Sales only flags; Martin decides; the client chooses. A recommendation is never a condition. A diagnosis is offered as a next step ("we'd suggest a short discovery session about {their words}"), never as a priced line.
 
 ### Design job
 
-**S1. Map.** Map each requested item to the closest §2 item by its characteristics: format (single page, folded, multi-page, digital or print), sides or pages, the design work involved (new design, resize or variant) and what is included. Show the reasoning for each match, e.g. "Fact sheet, two sides → Flyer or fact sheet, two sides (450): a single sheet, front and back". Include add-ons, ranges and printing. The price always comes from §2. If nothing on the list is close, say so, give the nearest options and ask Martin to quote it; never invent a price or estimate hours. Martin accepts or changes each mapping at S4. When an unlisted item keeps recurring, point it out to Martin as a candidate for its own price-list line.
+**S3. Brief check.** Confirm the brief is complete for every item. Ask for anything still missing in one draft reply for Martin's approval.
 
-**S2. Records.** Run the existing `sales-enquiry` intake (Entity, Registry, Matter). In the same approval message, propose `Engagement_Type` = Design job. A returning client gets a new Matter linked to the existing Entity.
-
-**S3. Brief.** Check what is needed to quote: item(s), quantity, sizes or formats, page count, deadline, existing logo or brand files, whether copy is needed, and for printing the quantity, material, finish, delivery and who supplies the artwork. Ask for everything missing in one draft reply for Martin's approval.
-
-**S4. Quote.** Present to Martin in one message: the line-by-line calculation (§4), the price-list date and the delivery time; the quote email draft including the §7 terms; and one Matter update — `Current_understanding` = "Design job: {items}, GHS {total}, price list 24 Nov 2026. Quote sent {date}." and `Next_action` = "Quote sent; awaiting client acceptance." Martin approves the exact email, or adjusts the price with a reason (recorded in Current_understanding). Then send it and write the update.
+**S4. Quote.** Present to Martin in one message: the line-by-line calculation (§4), the price-list date and the delivery time; the quote email draft including the §7 terms; any recommendation from S2 shown as a separate, optional part (a diagnosis only as a suggested next step, never priced); and one Matter update — `Current_understanding` = "Design job: {items}, GHS {total}, price list 24 Nov 2026. Quote sent {date}." and `Next_action` = "Quote sent; awaiting client acceptance." Martin approves the exact email, or adjusts the price with a reason (recorded in Current_understanding). Then send it and write the update.
 
 **S5. Acceptance.** When the client accepts in writing (email, or WhatsApp text Martin pastes), and any formal agreement needed under §8 is Signed, present one conversion package for a single approval:
 
@@ -113,19 +131,15 @@ Then draft the deposit request for Martin. Work starts when the deposit is paid 
 
 **S8. Close.** When the work is delivered and the Balance is Paid, propose: Matter Status Closed, `Next_action` "Delivered and paid.", and a log entry "Design work · job closed · MAT-n".
 
-### Consultancy treatment and design engagement
+### Design engagement
 
-**E1. Records.** Run the existing `sales-enquiry` intake (Entity, Registry, Matter). Leave `Engagement_Type` empty (Consultancy) until Martin chooses after the call; for a design engagement, propose `Engagement_Type` = Design engagement then (one write, on approval).
+**E1. Value brief.** From the recorded conversation, prepare in chat: purpose (launch, rebrand, new product, tender); reach (products, shops, regions, customers); the commercial stake (expected sales, contract value, the cost of getting it wrong); timeline and approvers; any budget mentioned (context only, never the price); and the exact scope (deliverables, quantities, packages from §3). Propose one identity-safe Matter update summarising scope and stake.
 
-**E2. Sales call.** Draft the call invitation with proposed times for Martin's approval (calendar actions as in `sales-correspondence`). Prepare with `sales-call-prep` and capture what was learned with `sales-call-evidence`. The call establishes the client's size, what is at stake, the approvers and the real need. Then Martin chooses a design engagement (E3–E6) or full consultancy (the existing skills from fit assessment on), and sets the size.
+**E2. Price.** Show Martin the scope, the minimum (§4) and the value brief. Martin sets the price and the hourly rate for extras (at least the §3 minimum). Record his price and reason in `Current_understanding`.
 
-**E3. Value brief.** From the call evidence, prepare in chat: purpose (launch, rebrand, new product, tender); reach (products, shops, regions, customers); the commercial stake (expected sales, contract value, the cost of getting it wrong); timeline and approvers; any budget mentioned (context only, never the price); and the exact scope (deliverables, quantities, packages from §3). Propose one identity-safe Matter update summarising scope and stake.
+**E3. Proposal.** Prepare the proposal document (Google Doc in Drive): scope and deliverables, price, payment (50/50 unless Martin decides otherwise), delivery, revisions, hourly extras, the §7 terms, and any recommendation from S2 as a separate, optional part. Draft the email. Send only on Martin's approval of the exact email and document. Matter `Next_action` = "Proposal sent; awaiting client acceptance."
 
-**E4. Price.** Show Martin the scope, the minimum (§4) and the value brief. Martin sets the price and the hourly rate for extras (at least the §3 minimum). Record his price and reason in `Current_understanding`.
-
-**E5. Proposal.** Prepare the proposal document (Google Doc in Drive): scope and deliverables, price, payment (50/50 unless Martin decides otherwise), delivery, revisions, hourly extras and the §7 terms. Draft the email. Send only on Martin's approval of the exact email and document. Matter `Next_action` = "Proposal sent; awaiting client acceptance."
-
-**E6. Agreement and conversion.** Over GHS 5,000, a formal agreement (§8); otherwise the client's written acceptance. Then S5's conversion package and S6–S8.
+**E4. Agreement and conversion.** Over GHS 5,000, a formal agreement (§8); otherwise the client's written acceptance. Then S5's conversion package and S6–S8.
 
 ## 6. Not taken or below minimum
 
@@ -152,8 +166,8 @@ Mixed enquiry: the normal path for the items taken; the quote politely excludes 
 
 ## 9. Notion calls (keep to these)
 
-- Reads: none for rules. Only what the `sales-enquiry` intake already does, plus one fetch of the Matter at S5 and S8.
-- Writes: S2/E1 Engagement_Type (1) · S4 or E3–E5 Matter updates (1 each) · S5 package (2 Payments + Matter + Entity + Log = 5) · S8 (Matter + Log = 2) · §6 decline (1 Log).
+- Reads: none for rules. Only what the `sales-enquiry` intake and `sales-call-evidence` already do, plus one fetch of the Matter at S5 and S8.
+- Writes: S2 Engagement_Type (1) · S4 or E1–E3 Matter updates (1 each) · S5 package (2 Payments + Matter + Entity + Log = 5) · S8 (Matter + Log = 2) · §6 decline (1 Log).
 
 ## 10. Maintaining this file
 
