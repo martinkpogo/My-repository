@@ -1,6 +1,6 @@
 # ENIG DESIGN WORK SOP
 
-**Status:** Canonical. Approved by Martin, 24 Nov 2026. **Price list as of 24 Nov 2026.** Governing model: Design Work Operating Model (ENIG HQ / Business-Wide Operating Models), LOG-1351, LOG-1352, LOG-1353 and LOG-1354. Canonical text: the "ENIG Design Work SOP" Notion page under Isolated Sales: Operating Specification. This file is the Claude Project's working copy and must match it.
+**Status:** Canonical. Approved by Martin, 24 Nov 2026. **Price list as of 24 Nov 2026.** Governing model: Design Work Operating Model (ENIG HQ / Business-Wide Operating Models), LOG-1351, LOG-1352, LOG-1353, LOG-1354 and LOG-1355. Canonical text: the "ENIG Design Work SOP" Notion page under Isolated Sales: Operating Specification. This file is the Claude Project's working copy and must match it.
 
 ## 0. When this applies
 
@@ -35,7 +35,8 @@
 | Business card | Front and back, print-ready file | 300 | 1 | 1–2 working days |
 | Stationery set | Business card, letterhead, and compliment slip or envelope | 750 | 2 | 3 working days |
 | Roll-up or large banner | 1 design, print-ready at full size | 450 | 1 | 2 working days |
-| Tri-fold brochure | 6 panels, print-ready file | 750 | 2 | 2–3 working days |
+| Bi-fold brochure or menu | 4 panels, print-ready file | 600 | 2 | 2 working days |
+| Tri-fold brochure or menu | 6 panels, print-ready file | 750 | 2 | 2–3 working days |
 | Company profile or multi-page brochure | Cover and up to 8 pages; each extra page +150 | 1,500 | 2 | 5–7 working days |
 | Editorial (magazine, newsletter, report, book, e-book) | Setup and cover 1,200, plus 150 per inner page | By page count | 2 rounds on the whole document | 3 working days + 1 working day per 3 pages |
 | Starter label | Front only, one product, one size, client's existing logo and text, print-ready file | 400 | 1 | 1–2 working days |
@@ -47,11 +48,12 @@
 - **Printing add-on:** print cost passed through and paid 100% up front. Coordination fee: GHS 100 for the first GHS 500 of print cost, + 10% of the part from 500 to 2,000, + 7% of the part from 2,000 to 10,000, + 5% of the part above 10,000. Each extra trip GHS 100.
 - **Product ranges:** new design (a new layout, or a different item) 100% of the level's price · resize (same design and content, different size or shape; elements removed, moved or shortened) 50% · variant (same layout and size; new flavour name, colours or text) 40%. The client approves any content removed or shortened for a resize. When the type is unclear, ask Martin.
 - **Printing the client's own artwork:** add a file check of GHS 150 (1 hour) to confirm it is print-ready (size, bleed, resolution, colours). Fixes to the client's file are GHS 150 an hour. Errors in the client's own artwork are the client's responsibility.
-- **Editorial rules:** the client supplies final, proofread text before layout; text changes after layout are charged hourly; the page count is fixed in the quote and extra pages are charged per page; one sample spread is approved before full layout; custom charts or infographics are charged hourly.
+- **Editorial rules:** inner pages are all pages except the front and back covers, which are part of the setup; the client supplies final, proofread text before layout; text changes after layout are charged hourly; the page count is fixed in the quote and extra pages are charged per page; one sample spread is approved before full layout; custom charts or infographics are charged hourly.
 - **Extra revisions and out-of-scope work:** GHS 150 an hour, minimum 1 hour; hours estimate approved first.
 - **Minimum job value:** GHS 250.
 - **Work not taken:** websites, photography, detailed illustration, running social media accounts.
 - **Busy week:** Martin may give a longer delivery time, but only before the deposit is paid.
+- **Several items:** if one depends on another (e.g. posts need the logo first), the delivery times add up; if independent, the longest time plus 1 working day per extra item. Martin may state otherwise in the quote.
 
 ## 3. Design engagements (established and large organisations)
 
