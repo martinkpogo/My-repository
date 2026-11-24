@@ -33,8 +33,8 @@
 
 - **Copywriting add-on (posts only):** +50 single · +200 for 5 · +300 for 10. Copy approved before design; 1 copy revision; client confirms every fact; marketing copy only (the client supplies legal or regulated text).
 - **Printing add-on:** print cost passed through and paid 100% up front. Coordination fee: GHS 100 for the first GHS 500 of print cost, + 10% of the part from 500 to 2,000, + 7% of the part from 2,000 to 10,000, + 5% of the part above 10,000. Each extra trip GHS 100.
-- **Printing the client's own artwork:** add a file check of GHS 150 (1 hour) to confirm it is print-ready (size, bleed, resolution, colours). Fixes to the client's file are GHS 150 an hour. Errors in the client's own artwork are the client's responsibility.
 - **Product ranges:** new design (a new layout, or a different item) 100% of the level's price · resize (same design and content, different size or shape; elements removed, moved or shortened) 50% · variant (same layout and size; new flavour name, colours or text) 40%. The client approves any content removed or shortened for a resize. When the type is unclear, ask Martin.
+- **Printing the client's own artwork:** add a file check of GHS 150 (1 hour) to confirm it is print-ready (size, bleed, resolution, colours). Fixes to the client's file are GHS 150 an hour. Errors in the client's own artwork are the client's responsibility.
 - **Extra revisions and out-of-scope work:** GHS 150 an hour, minimum 1 hour; hours estimate approved first.
 - **Minimum job value:** GHS 250.
 - **Work not taken:** websites, photography, detailed illustration, running social media accounts.
