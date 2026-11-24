@@ -172,7 +172,7 @@ const paymentsClerkActions: ActionDefinition<PaymentsClerkAction>[] = [
       conditions: [{ source: "work", field: "origin", operator: "equals", value: "direct_request" }],
     },
     description:
-      "Record a client payment Martin reports as received: find the one Due Payment row for the Matter and type, show the exact change, and set it to Paid only on Martin's approval. Never creates a Payment row or changes its Amount.",
+      "Record a client payment Martin reports as received -- a Deposit, a Balance or a print cost (the Payment Type Other) -- by finding the one Due Payment row for the Matter and type, showing the exact change, and setting it to Paid only on Martin's approval. Never creates a Payment row or changes its Amount.",
   },
 ];
 
@@ -188,7 +188,7 @@ const paymentsClerkHat: HatManifest<PaymentsClerkAction> = {
   name: PAYMENTS_CLERK_HAT_NAME,
   specialization: "Payment Recording",
   responsibility:
-    "Record a client payment Martin reports as received (deposit or balance) by setting the matching Due Payment row to Paid, only after Martin approves the exact change. Never prices, never creates a Payment row, never changes an Amount.",
+    "Record a client payment Martin reports as received (deposit, balance or print cost) by setting the matching Due Payment row to Paid, only after Martin approves the exact change. Never prices, never creates a Payment row, never changes an Amount.",
   actions: paymentsClerkActions,
   responsibilityId: "payment_recording",
   readHandler: paymentsClerkReadHandler,

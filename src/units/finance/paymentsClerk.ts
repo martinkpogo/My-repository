@@ -20,6 +20,12 @@ import { PAYMENTS_CLERK_HAT_NAME, PAYMENT_CALLBACK_PREFIX } from "./paymentsCler
  *     written to a Payment is never decided by a model;
  *   - never creates a Payment row and never changes Amount, Currency, Type
  *     or Matter_Token;
+ *   - reads a report's Type as Deposit, Balance or the exact phrase "print
+ *     cost" (the canonical Type `Other`, shown to Martin as print cost): a
+ *     bare "other" is never a Type, and a report naming more than one of the
+ *     three is refused as ambiguous; payment-method parsing stays separate,
+ *     so a print cost paid by cash, cheque or card still records Method
+ *     "Other";
  *   - handles Due -> Paid only (Waived, refunds and reversals stay manual);
  *   - stops and says why when the Matter, type, amount, currency or method is
  *     missing or ambiguous, when there is no single Due row, or when the
@@ -33,9 +39,18 @@ import { PAYMENTS_CLERK_HAT_NAME, PAYMENT_CALLBACK_PREFIX } from "./paymentsCler
 export { PAYMENTS_CLERK_HAT_NAME, PAYMENT_CALLBACK_PREFIX } from "./paymentsClerkNames";
 export const PAYMENTS_CLERK_DEFINITION_PAGE_ID = "415cb004-e583-811c-b429-fdaf471e0499";
 
-export type PaymentType = "Deposit" | "Balance";
+export type PaymentType = "Deposit" | "Balance" | "Other";
 export type PaymentCurrency = "GHS" | "USD";
 export type PaymentMethod = "Mobile money" | "Bank transfer" | "Other";
+
+/**
+ * How Martin sees a stored Type: the canonical Type `Other` is a print cost
+ * (IA-1, 2026-11-24) and is never shown bare; Deposit and Balance read as
+ * themselves, lowercased, exactly as before.
+ */
+function typeLabel(type: PaymentType): string {
+  return type === "Other" ? "print cost" : type.toLowerCase();
+}
 
 /** What Martin's message says, read with fixed rules. Missing required parts are listed, never guessed. */
 export interface PaymentReport {
@@ -134,9 +149,14 @@ export function parsePaymentReport(text: string, today: string): PaymentReport {
   if (matters.length === 1) report.matter = matters[0];
   else report.problems.push(matters.length === 0 ? "the Matter token (MAT-n)" : `exactly one Matter (found ${matters.join(", ")})`);
 
+  // Type: Deposit, Balance, or the exact phrase "print cost" (case-insensitive)
+  // for the canonical Type `Other`. A bare "other" is never a Payment Type.
+  // More than one of the three in one report is refused as ambiguous -- never resolved.
   const types = [...new Set([...text.matchAll(/\b(deposit|balance)\b/gi)].map((m) => m[1].toLowerCase()))];
-  if (types.length === 1) report.type = types[0] === "deposit" ? "Deposit" : "Balance";
-  else report.problems.push(types.length === 0 ? "whether it is the deposit or the balance" : "only one of deposit or balance");
+  if (/\bprint cost\b/i.test(text)) types.push("other");
+  if (types.length === 1) report.type = types[0] === "deposit" ? "Deposit" : types[0] === "balance" ? "Balance" : "Other";
+  else if (types.length === 0) report.problems.push("whether it is the deposit, the balance or the print cost");
+  else report.problems.push(types.includes("other") ? "only one of deposit, balance or print cost" : "only one of deposit or balance");
 
   // WHT and the invoice reference are taken out first, so their numbers are never read as the amount paid.
   const whtRe = new RegExp(String.raw`\b(?:WHT|withholding(?:\s+tax)?)\b[^\d\n]{0,25}?${AMOUNT_TOKEN}`, "i");
@@ -239,16 +259,29 @@ export async function handleRecordPaymentRequest(env: Env, state: WorkState, tex
   const due = rows.filter((p) => plainText(p.properties?.Status) === "Due");
   if (due.length === 0) {
     const paid = rows.find((p) => plainText(p.properties?.Status) === "Paid");
+    if (paid) {
+      return stop(
+        env,
+        state,
+        `${matter}'s ${typeLabel(type)} (${uniqueId(paid.properties?.Payment_ID) || "Payment row"}) is already recorded as Paid${dateStart(paid.properties?.Paid_Date) ? ` on ${dateStart(paid.properties?.Paid_Date)}` : ""}. Nothing was changed.`,
+      );
+    }
+    if (type === "Other") {
+      // No Due print-cost row: never write, never create -- point Martin at Isolated Sales.
+      return stop(
+        env,
+        state,
+        `I couldn't find a Due print cost row for ${matter}. No Payment was changed or created. Ask Isolated Sales to create the approved print-cost Payment row, then report the payment again.`,
+      );
+    }
     return stop(
       env,
       state,
-      paid
-        ? `${matter}'s ${type.toLowerCase()} (${uniqueId(paid.properties?.Payment_ID) || "Payment row"}) is already recorded as Paid${dateStart(paid.properties?.Paid_Date) ? ` on ${dateStart(paid.properties?.Paid_Date)}` : ""}. Nothing was changed.`
-        : `There is no Due ${type.toLowerCase()} row for ${matter} in Payments. Rows are created when the agreement is signed (Isolated Sales), so check the Matter token or record the signing first. Nothing was recorded.`,
+      `There is no Due ${typeLabel(type)} row for ${matter} in Payments. Rows are created when the agreement is signed (Isolated Sales), so check the Matter token or record the signing first. Nothing was recorded.`,
     );
   }
   if (due.length > 1) {
-    return stop(env, state, `${matter} has ${due.length} Due ${type.toLowerCase()} rows (${due.map((p) => uniqueId(p.properties?.Payment_ID) || p.id).join(", ")}), so I can't tell which one this is. Fix the duplicates in Payments, then send it again. Nothing was recorded.`);
+    return stop(env, state, `${matter} has ${due.length} Due ${typeLabel(type)} rows (${due.map((p) => uniqueId(p.properties?.Payment_ID) || p.id).join(", ")}), so I can't tell which one this is. Fix the duplicates in Payments, then send it again. Nothing was recorded.`);
   }
   const row = due[0];
   const rowCurrency = plainText(row.properties?.Currency) as PaymentCurrency;
@@ -294,7 +327,7 @@ export async function handleRecordPaymentRequest(env: Env, state: WorkState, tex
         : `Amount check: ⚠️ you reported ${currency} ${fmt(amount)}${whtNote}, but the row's Amount is ${currency} ${fmt(rowAmount)}${pending.wht === undefined ? ` (a gap of ${currency} ${fmt(Math.abs(rowAmount - amount))})` : ""}. The row's Amount will not change. Record it as Paid anyway?`;
 
   const message = [
-    `*Record payment — ${matter} ${type.toLowerCase()}* (${paymentId})`,
+    `*Record payment — ${matter} ${typeLabel(type)}* (${paymentId})`,
     `Row now: Due · ${currency} ${fmt(rowAmount)}${dateStart(row.properties?.Due_Date) ? ` · due ${dateStart(row.properties?.Due_Date)}` : ""}`,
     "",
     "Change:",
@@ -313,7 +346,7 @@ export async function handleRecordPaymentRequest(env: Env, state: WorkState, tex
 
   financeOf(state).pendingPayment = pending;
   state.stage = "awaiting_payment_approval";
-  state.pendingActionSummary = { label: `Payment: ${matter} ${type.toLowerCase()}`, message, buttons, createdAt: new Date().toISOString() };
+  state.pendingActionSummary = { label: `Payment: ${matter} ${typeLabel(type)}`, message, buttons, createdAt: new Date().toISOString() };
   await sendWorkspaceHatMessage(env, target(state), message, buttons);
   return state;
 }
@@ -356,7 +389,7 @@ export async function handlePaymentApproval(env: Env, state: WorkState, approved
     await sendWorkspaceHatMessage(env, target(state), "There's no pending payment on this card any more. Nothing was changed.");
     return state;
   }
-  const label = `${pending.matter} ${pending.type.toLowerCase()} (${pending.paymentId})`;
+  const label = `${pending.matter} ${typeLabel(pending.type)} (${pending.paymentId})`;
 
   if (!approved) {
     state.stage = "cancelled";
@@ -456,7 +489,13 @@ export async function handlePaymentApproval(env: Env, state: WorkState, approved
     outcome: "Complete",
     workId: state.workId,
   });
-  const next = pending.type === "Deposit" ? `\n\nWork on ${pending.matter} can start once its agreement is Signed (check Agreements).` : "";
+  // Deposit only (IA-1): the approved pre-work reminder replaces the old
+  // "agreement is Signed" sentence. No data reads, no agreement inference,
+  // and never added to Balance or print-cost confirmations.
+  const next =
+    pending.type === "Deposit"
+      ? `\n\nBefore starting work on ${pending.matter}, check that the brief is complete and the agreement is in place (a Signed agreement, or the client's written acceptance of the quote).`
+      : "";
   await sendWorkspaceHatMessage(env, target(state), `✅ ${label} recorded as Paid on ${pending.paidDate}.${next}`);
   return state;
 }
