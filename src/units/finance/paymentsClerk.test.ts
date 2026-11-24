@@ -72,8 +72,9 @@ function props(r: Row) {
   };
 }
 
-function mockNotion(t: any, rows: Row[], opts: { failPatch?: boolean } = {}) {
+function mockNotion(t: any, rows: Row[], opts: { failPatch?: boolean; failReadBack?: boolean } = {}) {
   const calls = { queries: 0, patches: [] as any[], logs: [] as any[], telegram: [] as any[] };
+  let sawPatch = false;
   const original = globalThis.fetch;
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = String(input);
@@ -93,6 +94,7 @@ function mockNotion(t: any, rows: Row[], opts: { failPatch?: boolean } = {}) {
       const row = rows.find((r) => r.id === page[1]);
       if (!row) return new Response("{}", { status: 404 });
       if (init?.method === "PATCH") {
+        sawPatch = true;
         calls.patches.push(body.properties);
         if (opts.failPatch) return new Response(JSON.stringify({ message: "boom" }), { status: 500 });
         const p = body.properties;
@@ -101,6 +103,10 @@ function mockNotion(t: any, rows: Row[], opts: { failPatch?: boolean } = {}) {
         if (p.Method) row.method = p.Method.select.name;
         if (p.WHT_Deducted) row.wht = p.WHT_Deducted.number;
         if (p.Invoice_Number) row.invoice = p.Invoice_Number.rich_text[0].text.content;
+      } else if (opts.failReadBack && sawPatch) {
+        // The write already succeeded: every later read of the row fails, so
+        // the post-write read-back in handlePaymentApproval takes its failure path.
+        return new Response(JSON.stringify({ message: "read failed" }), { status: 500 });
       }
       return new Response(JSON.stringify({ id: row.id, url: `https://notion.so/${row.id}`, parent: { type: "data_source_id", data_source_id: PAY_DS }, properties: props(row) }), { status: 200 });
     }
@@ -117,6 +123,9 @@ function mockNotion(t: any, rows: Row[], opts: { failPatch?: boolean } = {}) {
 }
 
 const dueDeposit = (over: Partial<Row> = {}): Row => ({ id: "row-1", number: 5, matter: "MAT-32", type: "Deposit", status: "Due", currency: "GHS", amount: 6000, ...over });
+/** The canonical Payment Type `Other` as a print-cost Due row, built on the same helper as a deposit. */
+const duePrintCost = (over: Partial<Row> = {}): Row => dueDeposit({ type: "Other", amount: 500, ...over });
+const PRINT_COST_REPORT = "MAT-32 print cost paid, GHS 500, cash";
 const lastText = (calls: { telegram: any[] }) => String(calls.telegram.at(-1)?.text ?? "");
 const logText = (log: any) => JSON.stringify(log);
 
@@ -257,9 +266,9 @@ test("entry: fails closed when the Payments Clerk's Notion definition is unreada
 
 // ---------------------------------------------------------------- approval
 
-async function staged(t: any, rows: Row[], opts?: { failPatch?: boolean }) {
+async function staged(t: any, rows: Row[], opts?: { failPatch?: boolean; failReadBack?: boolean }, text: string = MARTIN) {
   const calls = mockNotion(t, rows, opts);
-  const state = await handleRecordPaymentRequest(fakeEnv(), fakeState(), MARTIN, TODAY);
+  const state = await handleRecordPaymentRequest(fakeEnv(), fakeState(), text, TODAY);
   return { calls, state };
 }
 
@@ -280,7 +289,7 @@ test("approve: writes exactly the shown change, reads it back, logs it and confi
   assert.strictEqual(rows[0].amount, 6000, "Amount untouched");
   assert.ok(!("Amount" in calls.patches[0]) && !("Currency" in calls.patches[0]) && !("Type" in calls.patches[0]));
   assert.match(lastText(calls), /MAT-32 deposit \(PAY-5\) recorded as Paid on 2026-11-12/);
-  assert.match(lastText(calls), /can start once its agreement is Signed/);
+  assert.match(lastText(calls), /Before starting work on MAT-32, check that the brief is complete and the agreement is in place/);
   assert.ok(calls.logs.some((l) => /Payment recorded: MAT-32 deposit \(PAY-5\)/.test(logText(l))));
   assert.strictEqual(done.finance?.pendingPayment, undefined);
 });
@@ -376,4 +385,136 @@ test("routing: Cowork resolves the named Payments Clerk's one Action structurall
   const result = await resolveUnitRequest(env, financeManifest, { chatId: -100, threadId: 604 } as any, MARTIN, "Payments Clerk");
   assert.strictEqual((result as any).actionName, "record_payment");
   assert.strictEqual(aiCalls, 0);
+});
+
+// -------------------------------- IA-1 Stage 1 print-cost support (ten tests)
+
+test("IA-1 Stage 1: the exact phrase 'print cost', case-insensitive, parses to Payment Type Other", () => {
+  for (const phrase of ["print cost", "PRINT COST", "Print Cost"]) {
+    const r = parsePaymentReport(`MAT-44 ${phrase} paid, GHS 500, cash`, TODAY);
+    assert.deepStrictEqual(r.problems, [], phrase);
+    assert.strictEqual(r.type, "Other", phrase);
+    assert.strictEqual(r.matter, "MAT-44");
+    assert.strictEqual(r.amount, 500);
+    assert.strictEqual(r.currency, "GHS");
+    assert.strictEqual(r.method, "Other");
+    assert.strictEqual(r.paidDate, TODAY);
+  }
+  // Deposit and Balance keep parsing exactly as before.
+  assert.strictEqual(parsePaymentReport("MAT-44 deposit paid, GHS 500, cash", TODAY).type, "Deposit");
+  assert.strictEqual(parsePaymentReport("MAT-44 balance paid, GHS 500, cash", TODAY).type, "Balance");
+});
+
+test("IA-1 Stage 1: a bare 'other' is refused as a Payment Type", () => {
+  const r = parsePaymentReport("MAT-44 other paid, GHS 500, cash", TODAY);
+  assert.strictEqual(r.type, undefined, "bare 'other' never becomes a Payment Type");
+  assert.match(r.problems.join(" "), /deposit, the balance or the print cost/);
+});
+
+test("IA-1 Stage 1: a report naming more than one payment type is refused as ambiguous", () => {
+  const withDeposit = parsePaymentReport("MAT-44 deposit and print cost paid, GHS 500, cash", TODAY);
+  assert.strictEqual(withDeposit.type, undefined);
+  assert.match(withDeposit.problems.join(" "), /only one of deposit, balance or print cost/);
+  const withBalance = parsePaymentReport("MAT-44 balance print cost paid, GHS 500, cash", TODAY);
+  assert.strictEqual(withBalance.type, undefined);
+  assert.match(withBalance.problems.join(" "), /only one of deposit, balance or print cost/);
+  // The pre-existing deposit-vs-balance ambiguity keeps its own message.
+  const depositVsBalance = parsePaymentReport("MAT-44 deposit and balance paid, GHS 500, cash", TODAY);
+  assert.strictEqual(depositVsBalance.type, undefined);
+  assert.match(depositVsBalance.problems.join(" "), /only one of deposit or balance/);
+});
+
+test("IA-1 Stage 1: Payment Method Other stays independent of Payment Type Other", () => {
+  const printByCard = parsePaymentReport("MAT-44 print cost paid, GHS 500, card", TODAY);
+  assert.strictEqual(printByCard.type, "Other");
+  assert.strictEqual(printByCard.method, "Other");
+  const depositByCash = parsePaymentReport("MAT-44 deposit paid, GHS 500, cash", TODAY);
+  assert.strictEqual(depositByCash.type, "Deposit");
+  assert.strictEqual(depositByCash.method, "Other");
+  const balanceByCheque = parsePaymentReport("MAT-44 balance paid, GHS 500, cheque", TODAY);
+  assert.strictEqual(balanceByCheque.type, "Balance");
+  assert.strictEqual(balanceByCheque.method, "Other");
+});
+
+test("IA-1 Stage 1: exactly one Due Type Other row stages the approval card displaying 'print cost'", async (t) => {
+  const calls = mockNotion(t, [duePrintCost()]);
+  const state = await handleRecordPaymentRequest(fakeEnv(), fakeState(), PRINT_COST_REPORT, TODAY);
+  assert.strictEqual(state.stage, "awaiting_payment_approval");
+  assert.strictEqual(calls.queries, 1, "one query on the stored Type Other");
+  assert.strictEqual(calls.patches.length, 0, "staging writes nothing");
+  const card = lastText(calls);
+  assert.ok(card.includes("Record payment — MAT-32 print cost"), card);
+  assert.ok(!card.includes("MAT-32 other"), "the stored Type Other is never displayed bare");
+  assert.strictEqual(state.pendingActionSummary?.label, "Payment: MAT-32 print cost");
+  assert.strictEqual(state.finance?.pendingPayment?.type, "Other");
+  assert.strictEqual(state.finance?.pendingPayment?.amountCheck, "gross");
+});
+
+test("IA-1 Stage 1: no Due print-cost row gives the exact guidance and attempts no PATCH or creation", async (t) => {
+  const calls = mockNotion(t, []);
+  const s = await handleRecordPaymentRequest(fakeEnv(), fakeState(), PRINT_COST_REPORT, TODAY);
+  assert.strictEqual(s.stage, "cancelled");
+  // The workspace label ("Hat: Payments Clerk.") always precedes the message body.
+  assert.strictEqual(
+    lastText(calls),
+    `Hat: Payments Clerk.\n\nI couldn't find a Due print cost row for MAT-32. No Payment was changed or created. Ask Isolated Sales to create the approved print-cost Payment row, then report the payment again.`,
+  );
+  assert.strictEqual(calls.patches.length, 0, "no PATCH");
+  assert.strictEqual(calls.logs.length, 0, "no page was created (a create would be a POST /v1/pages)");
+  assert.strictEqual(s.finance?.pendingPayment, undefined);
+});
+
+test("IA-1 Stage 1: duplicate Due print-cost rows stop and identify the Payment IDs", async (t) => {
+  const calls = mockNotion(t, [duePrintCost(), duePrintCost({ id: "row-2", number: 6 })]);
+  const s = await handleRecordPaymentRequest(fakeEnv(), fakeState(), PRINT_COST_REPORT, TODAY);
+  assert.strictEqual(s.stage, "cancelled");
+  assert.match(lastText(calls), /MAT-32 has 2 Due print cost rows \(PAY-5, PAY-6\)/);
+  assert.strictEqual(calls.patches.length, 0, "no write on duplicates");
+});
+
+test("IA-1 Stage 1: approval writes only the allowlisted fields; result and Activity Log display 'print cost'", async (t) => {
+  const rows = [duePrintCost()];
+  const { calls, state } = await staged(t, rows, undefined, PRINT_COST_REPORT);
+  assert.strictEqual(state.stage, "awaiting_payment_approval");
+  const done = await handlePaymentApproval(fakeEnv(), state, true);
+  assert.strictEqual(done.stage, "complete");
+  assert.deepStrictEqual(calls.patches, [
+    {
+      Status: { select: { name: "Paid" } },
+      Paid_Date: { date: { start: "2026-11-12" } },
+      Method: { select: { name: "Other" } },
+    },
+  ]);
+  assert.strictEqual(rows[0].amount, 500, "Amount untouched");
+  assert.ok(
+    !("Amount" in calls.patches[0]) && !("Currency" in calls.patches[0]) && !("Type" in calls.patches[0]) && !("Matter_Token" in calls.patches[0]),
+    "no write outside the allowlist",
+  );
+  assert.match(lastText(calls), /MAT-32 print cost \(PAY-5\) recorded as Paid on 2026-11-12/);
+  assert.ok(!/Before starting work on/.test(lastText(calls)), "the deposit sentence is never added to a print-cost confirmation");
+  assert.ok(calls.logs.some((l) => /Payment recorded: MAT-32 print cost \(PAY-5\)/.test(logText(l))));
+});
+
+test("IA-1 Stage 1: the deposit confirmation ends with the exact approved sentence carrying the Matter token", async (t) => {
+  const { calls, state } = await staged(t, [dueDeposit()]);
+  const done = await handlePaymentApproval(fakeEnv(), state, true);
+  assert.strictEqual(done.stage, "complete");
+  // Exact approved confirmation; the "Hat: Payments Clerk." label is the standard workspace prefix.
+  assert.strictEqual(
+    lastText(calls),
+    "Hat: Payments Clerk.\n\n✅ MAT-32 deposit (PAY-5) recorded as Paid on 2026-11-12.\n\nBefore starting work on MAT-32, check that the brief is complete and the agreement is in place (a Signed agreement, or the client's written acceptance of the quote).",
+  );
+});
+
+test("IA-1 Stage 1: successful PATCH then failed read-back logs a Blocker, reports the row needs checking, and issues no second PATCH", async (t) => {
+  const rows = [dueDeposit()];
+  const { calls, state } = await staged(t, rows, { failReadBack: true });
+  const done = await handlePaymentApproval(fakeEnv(), state, true);
+  assert.strictEqual(calls.patches.length, 1, "the write succeeded exactly once");
+  assert.strictEqual(done.stage, "cancelled");
+  assert.strictEqual(done.finance?.pendingPayment, undefined, "no restage after a successful write");
+  assert.ok(calls.logs.some((l) => /Blocker/.test(logText(l)) && /needs checking/.test(logText(l))), "a Blocker was logged");
+  assert.match(lastText(calls), /reading it back did not match/);
+  assert.match(lastText(calls), /check the row in Payments/);
+  assert.match(lastText(calls), /won't write it again/);
 });
