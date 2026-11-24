@@ -1,6 +1,6 @@
 # ENIG STUDIO SOP: DESIGN JOBS
 
-**Status:** DRAFT. Not in force until Martin approves it. **Price list as of 24 Nov 2026.** Governing model: Design Jobs Operating Model (ENIG HQ / Business-Wide Operating Models), LOG-1351. Canonical text: the "ENIG Studio SOP" Notion page under Isolated Sales: Operating Specification. This file is the Claude Project's working copy and must match it.
+**Status:** Canonical. Approved by Martin, 24 Nov 2026. **Price list as of 24 Nov 2026.** Governing model: Design Jobs Operating Model (ENIG HQ / Business-Wide Operating Models), LOG-1351. Canonical text: the "ENIG Studio SOP" Notion page under Isolated Sales: Operating Specification. This file is the Claude Project's working copy and must match it.
 
 ## 0. When this applies
 
